@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseUsageJson } from "../src/usage/print-reader.js";
-import type { ProviderQuota, ProviderQuotaBucket, QuotaWindow } from "../src/usage/types.js";
-import { assertUniqueWindows, toQuotaWindows } from "../src/usage/windows.js";
+import { parseUsageJson } from "../src/usage/print-reader.ts";
+import type { ProviderQuota, ProviderQuotaBucket, QuotaWindow } from "../src/usage/types.ts";
+import { assertUniqueWindows, toQuotaWindows } from "../src/usage/windows.ts";
 
 function liveQuota(): ProviderQuota {
   const result = parseUsageJson(

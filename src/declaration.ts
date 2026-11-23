@@ -1,5 +1,5 @@
 import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
-import { ANTIGRAVITY } from "./identity.js";
+import { ANTIGRAVITY } from "./identity.ts";
 
 const REASONING_LEVELS = [
   { id: "low", label: "Low" },

@@ -1,4 +1,4 @@
-import type { ProviderQuota, ProviderQuotaBucket, QuotaWindow } from "./types.js";
+import type { ProviderQuota, ProviderQuotaBucket, QuotaWindow } from "./types.ts";
 
 const SPAN_LABELS = { weekly: "7d", "5h": "5h", daily: "1d" } as const;
 

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseUsageJson } from "../src/usage/print-reader.js";
+import { parseUsageJson } from "../src/usage/print-reader.ts";
 
 const live = readFileSync(new URL("./fixtures/usage-live.json", import.meta.url), "utf8");
 

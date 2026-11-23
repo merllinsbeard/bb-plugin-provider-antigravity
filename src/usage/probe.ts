@@ -5,10 +5,10 @@ import {
   experimental_hostToolchain,
   experimental_spawnHostProcess,
 } from "@get-bb/plugin-sdk/process";
-import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.js";
-import { parseUsageJson, type ParseFailure } from "./print-reader.js";
-import type { ProbeFailure, ProbeOutcome } from "./types.js";
-import { toQuotaWindows } from "./windows.js";
+import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
+import { parseUsageJson, type ParseFailure } from "./print-reader.ts";
+import type { ProbeFailure, ProbeOutcome } from "./types.ts";
+import { toQuotaWindows } from "./windows.ts";
 
 const USAGE_ARGS = ["-p", "/usage", "--output-format", "json", "--print-timeout", "15s"];
 const KILL_AFTER_MS = 20_000;

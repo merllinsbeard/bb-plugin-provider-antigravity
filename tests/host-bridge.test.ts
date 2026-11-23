@@ -11,7 +11,7 @@ import {
   experimental_createBridgeJsonRpcTestHarness,
   type BridgeJsonRpcTestHarness,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
-import { antigravityDeclaration } from "../src/declaration.js";
+import { antigravityDeclaration } from "../src/declaration.ts";
 
 const fakeBin = fileURLToPath(new URL("./fixtures/home/.local/bin/", import.meta.url));
 const fakeAgy = path.join(fakeBin, "agy");
@@ -51,7 +51,7 @@ beforeEach(async () => {
   vi.stubEnv("BB_ANTIGRAVITY_EXECUTABLE", fakeAgy);
   vi.stubEnv("AGY_FAKE_LOG", log);
   vi.resetModules();
-  const { experimental_providerBridge } = await import("../host.js");
+  const { experimental_providerBridge } = await import("../host.ts");
   harness = experimental_createBridgeJsonRpcTestHarness(experimental_providerBridge.handleLine);
 });
 

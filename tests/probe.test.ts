@@ -11,7 +11,7 @@ import {
   withSingleFlight,
   type PrintRun,
   type ProbePorts,
-} from "../src/usage/probe.js";
+} from "../src/usage/probe.ts";
 
 const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fakeHome = path.join(fixtures, "home");

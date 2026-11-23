@@ -1,4 +1,4 @@
-import type { UsageMeasurement } from "../../src/usage-contract.js";
+import type { UsageMeasurement } from "../../src/usage-contract.ts";
 
 export function normalizeUsageMeasurement(
   measurement: UsageMeasurement,

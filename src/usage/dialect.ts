@@ -1,7 +1,7 @@
 import type { AcpDialect } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import type { ProviderUsageResult } from "@get-bb/plugin-sdk/provider-bridge";
-import { probeQuota, withSingleFlight, type ProbePorts } from "./probe.js";
-import type { ProbeOutcome } from "./types.js";
+import { probeQuota, withSingleFlight, type ProbePorts } from "./probe.ts";
+import type { ProbeOutcome } from "./types.ts";
 
 type AcpMaintenanceDialect = NonNullable<AcpDialect["maintenance"]>;
 

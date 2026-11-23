@@ -1,13 +1,13 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { ANTIGRAVITY } from "./identity.js";
+import { ANTIGRAVITY } from "./identity.ts";
 import {
   usageFetchMethod,
   usageListMethod,
   usageMeasurementSchema,
   usageSourceRpcContract,
   type UsageMeasurement,
-} from "./usage-contract.js";
+} from "./usage-contract.ts";
 
 const CACHE_TTL_MS = 60_000;
 const UNKNOWN_ACCOUNT = { accountEmail: null, planLabel: null };

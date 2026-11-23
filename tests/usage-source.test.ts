@@ -7,9 +7,9 @@ import {
   usageMeasurementSchema,
   usageResourceListSchema,
   usageSourceRpcContract,
-} from "../src/usage-contract.js";
-import { registerUsageSource } from "../src/usage-source.js";
-import { normalizeUsageMeasurement } from "./support/usage-normalization.js";
+} from "../src/usage-contract.ts";
+import { registerUsageSource } from "../src/usage-source.ts";
+import { normalizeUsageMeasurement } from "./support/usage-normalization.ts";
 
 type HostUsage = Record<string, unknown>;
 type Handlers = Record<string, (input: unknown) => Promise<unknown>>;

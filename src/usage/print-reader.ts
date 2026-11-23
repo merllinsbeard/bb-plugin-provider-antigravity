@@ -4,7 +4,7 @@ import type {
   ProviderQuotaBucket,
   ProviderQuotaGroup,
   QuotaWindowSpan,
-} from "./types.js";
+} from "./types.ts";
 
 export type ParseFailure =
   | { readonly kind: "not-expanded" }
