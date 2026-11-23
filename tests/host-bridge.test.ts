@@ -11,14 +11,12 @@ import {
   experimental_createBridgeJsonRpcTestHarness,
   type BridgeJsonRpcTestHarness,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
+import { antigravityDeclaration } from "../src/declaration.js";
 
 const fakeBin = fileURLToPath(new URL("./fixtures/home/.local/bin/", import.meta.url));
 const fakeAgy = path.join(fakeBin, "agy");
 
-const providerOptions = {
-  acpDialect: "antigravity",
-  acpLaunchSpec: { displayName: "Google Antigravity", command: "agy", args: ["acp"], env: {} },
-};
+const providerOptions = antigravityDeclaration().experimental_bridgeOptions ?? {};
 
 let home: string;
 let log: string;

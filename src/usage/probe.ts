@@ -10,7 +10,7 @@ import { parseUsageJson, type ParseFailure } from "./print-reader.js";
 import type { ProbeFailure, ProbeOutcome } from "./types.js";
 import { toQuotaWindows } from "./windows.js";
 
-export const USAGE_ARGS = ["-p", "/usage", "--output-format", "json", "--print-timeout", "15s"];
+const USAGE_ARGS = ["-p", "/usage", "--output-format", "json", "--print-timeout", "15s"];
 const KILL_AFTER_MS = 20_000;
 const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 64 * 1024;
