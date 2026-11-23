@@ -41,7 +41,7 @@ function untilReset(resetsAt: string | null, now: number) {
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
   if (days > 0) return hours > 0 ? `${days}д ${hours}ч` : `${days}д`;
-  if (hours > 0) return `${hours}ч ${minutes % 60}м`;
+  if (hours > 0) return minutes % 60 > 0 ? `${hours}ч ${minutes % 60}м` : `${hours}ч`;
   return `${minutes}м`;
 }
 
@@ -59,10 +59,12 @@ function plural(count: number, one: string, few: string, many: string) {
   return many;
 }
 
-function hue(name: string) {
+const MONOGRAM_COLORS = ["#6366f1", "#0d9488", "#8b5cf6", "#0284c7", "#b45309", "#059669", "#db2777", "#4f46e5"];
+
+function monogramColor(name: string) {
   let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) % 360;
-  return hash;
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return MONOGRAM_COLORS[hash % MONOGRAM_COLORS.length]!;
 }
 
 function tighter(group: Group): Window {
@@ -121,7 +123,7 @@ function AccountCard({ account, isNext, now }: { account: PoolAccount; isNext: b
   const problem = quotaProblem(account);
   const groups = account.quota.status === "ok" ? account.quota.groups : [];
   const main = groups.filter((group) => group.fiveHour !== null);
-  const color = `hsl(${hue(account.name)} 55% 48%)`;
+  const color = monogramColor(account.name);
   return (
     <button
       type="button"
@@ -137,8 +139,8 @@ function AccountCard({ account, isNext, now }: { account: PoolAccount; isNext: b
     >
       <span className="flex min-w-0 items-center gap-2">
         <span
-          className="flex size-6 shrink-0 items-center justify-center rounded-md text-2xs font-semibold text-white"
-          style={{ backgroundColor: color }}
+          className="flex size-6 shrink-0 items-center justify-center rounded-md text-2xs font-semibold"
+          style={{ color, backgroundColor: `color-mix(in srgb, ${color} 16%, transparent)` }}
         >
           {account.name.slice(0, 1).toUpperCase()}
         </span>
@@ -310,7 +312,7 @@ function PoolPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
           disabled={busy}
           className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:opacity-60"
         >
-          <Icon name="RotateCw" className={cx("size-3.5", busy && "animate-spin")} aria-hidden />
+          <Icon name="RotateCcw" className={cx("size-3.5", busy && "animate-spin [animation-direction:reverse]")} aria-hidden />
         </button>
         <button
           type="button"
