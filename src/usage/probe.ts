@@ -5,8 +5,9 @@ import {
   experimental_hostToolchain,
   experimental_spawnHostProcess,
 } from "@get-bb/plugin-sdk/process";
-import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { parseUsageJson, type ParseFailure } from "./print-reader.ts";
+import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
+import type { Command } from "../pool/account.ts";
 import type { ProbeFailure, ProbeOutcome } from "./types.ts";
 import { toQuotaWindows } from "./windows.ts";
 
@@ -63,12 +64,17 @@ export function hasAuthToken(homeDir: string): boolean {
 export function createPrintRunner({
   killAfterMs = KILL_AFTER_MS,
   maxStdoutBytes = MAX_STDOUT_BYTES,
-}: { killAfterMs?: number; maxStdoutBytes?: number } = {}): (binary: string) => Promise<PrintRun> {
+  command = (binary, args) => ({ command: binary, args }),
+}: {
+  killAfterMs?: number;
+  maxStdoutBytes?: number;
+  command?: (binary: string, args: readonly string[]) => Command;
+} = {}): (binary: string) => Promise<PrintRun> {
   return (binary) =>
     new Promise<PrintRun>((resolve) => {
       let child: ReturnType<typeof spawnUsage>;
       try {
-        child = spawnUsage(binary);
+        child = spawnUsage(command(binary, USAGE_ARGS));
       } catch (error) {
         resolve({ kind: "spawn-failed", message: errorMessage(error) });
         return;
@@ -103,8 +109,8 @@ export function createPrintRunner({
     });
 }
 
-function spawnUsage(binary: string) {
-  return experimental_spawnHostProcess(binary, USAGE_ARGS, {
+function spawnUsage({ command, args }: Command) {
+  return experimental_spawnHostProcess(command, [...args], {
     stdio: ["ignore", "pipe", "pipe"],
     env: sanitizeInheritedChildProcessEnv({ env: process.env }),
   });
@@ -159,6 +165,7 @@ export async function probeQuota(ports: ProbePorts): Promise<ProbeOutcome> {
   if (!parsed.ok) return { ok: false, failure: { status: "error", message: parseMessage(parsed.failure) } };
   return {
     ok: true,
+    quota: parsed.quota,
     reading: { accountEmail: null, planLabel: null, windows: toQuotaWindows(parsed.quota) },
   };
 }

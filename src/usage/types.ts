@@ -34,5 +34,5 @@ export type ProbeFailure =
   | { readonly status: "error"; readonly message: string };
 
 export type ProbeOutcome =
-  | { readonly ok: true; readonly reading: QuotaReading }
+  | { readonly ok: true; readonly quota: ProviderQuota; readonly reading: QuotaReading }
   | { readonly ok: false; readonly failure: ProbeFailure };
