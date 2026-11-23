@@ -1,0 +1,273 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parseAccountName, shareConversations, type AccountName, type PoolPaths } from "../src/pool/account.ts";
+import { QUOTA_MESSAGE, isQuotaError, markExhausted, quotaResetMs, readExhausted } from "../src/pool/exhaustion.ts";
+
+const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
+const fakeBin = fileURLToPath(new URL("./fixtures/fake-acp-agy", import.meta.url));
+
+function usageJson(gemini5h: number, geminiWeekly = 1): string {
+  const bucket = (id: string, window: string, remaining_fraction: number) => ({
+    id,
+    name: window,
+    window,
+    remaining_fraction,
+    reset_time: "2026-11-28T09:00:00Z",
+  });
+  return JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      name: "usage",
+      data: {
+        groups: [
+          { name: "Gemini Models", buckets: [bucket("gemini-weekly", "weekly", geminiWeekly), bucket("gemini-5h", "5h", gemini5h)] },
+        ],
+      },
+    },
+  });
+}
+
+describe("exhaustion helpers", () => {
+  it("matches agy quota refusals and ignores ordinary prose", () => {
+    expect(QUOTA_MESSAGE.test("\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h18m19s.\n")).toBe(
+      true,
+    );
+    expect(QUOTA_MESSAGE.test("⚠️ RESOURCE_EXHAUSTED: quota reached")).toBe(true);
+    expect(QUOTA_MESSAGE.test("The error says Individual quota reached when the window fills.")).toBe(false);
+    expect(isQuotaError("RESOURCE_EXHAUSTED: Individual quota reached")).toBe(true);
+  });
+
+  it("parses reset durations and falls back to 15 minutes", () => {
+    expect(quotaResetMs("Resets in 3h18m19s.")).toBe((3 * 3600 + 18 * 60 + 19) * 1000);
+    expect(quotaResetMs("Resets in 36m29s.")).toBe((36 * 60 + 29) * 1000);
+    expect(quotaResetMs("Resets in 45s.")).toBe(45 * 1000);
+    expect(quotaResetMs("No reset timestamp")).toBe(15 * 60 * 1000);
+  });
+
+  it("reads active marks and drops expired ones", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "agy-exhaust-"));
+    try {
+      const file = path.join(dir, "exhausted.json");
+      const now = new Date("2026-11-23T16:00:00Z");
+      markExhausted(file, parseAccountName("acc2")!, new Date("2026-11-23T15:00:00Z"));
+      markExhausted(file, parseAccountName("acc3")!, new Date("2026-11-23T19:00:00Z"));
+      const active = readExhausted(file, now);
+      expect(active.has("acc2" as AccountName)).toBe(false);
+      expect(active.get("acc3" as AccountName)).toBe("2026-11-23T19:00:00.000Z");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("shareConversations", () => {
+  it("migrates added account conversations into the shared store without overwriting existing entries", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "agy-share-"));
+    try {
+      const paths: PoolPaths = {
+        agyStateDir: path.join(dir, "default"),
+        accountsRoot: path.join(dir, "accounts"),
+        bindingsFile: path.join(dir, "state", "bindings.json"),
+      };
+      const altDir = path.join(paths.accountsRoot, "alt");
+      mkdirSync(path.join(paths.agyStateDir, "conversations"), { recursive: true });
+      mkdirSync(path.join(altDir, "conversations"), { recursive: true });
+      writeFileSync(path.join(paths.agyStateDir, "conversations", "keep.db"), "store-copy");
+      writeFileSync(path.join(altDir, "conversations", "keep.db"), "alt-copy");
+      writeFileSync(path.join(altDir, "conversations", "move.db"), "moved-copy");
+
+      shareConversations(paths, { name: "alt" as AccountName, dir: altDir, egress: { kind: "direct" } });
+      expect(readFileSync(path.join(paths.agyStateDir, "conversations", "keep.db"), "utf8")).toBe("store-copy");
+      expect(readFileSync(path.join(paths.agyStateDir, "conversations", "move.db"), "utf8")).toBe("moved-copy");
+      expect(existsSync(path.join(altDir, "conversations", "move.db"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("agy-pool ACP relay failover", () => {
+  let root: string;
+  let home: string;
+  let logFile: string;
+  let children: ChildProcess[];
+
+  const stateDir = () => path.join(home, ".gemini", "antigravity-cli");
+  const accountDir = (name: string) => path.join(home, ".local", "share", "agy-accounts", name);
+  const statePath = (file: string) => path.join(home, ".local", "state", "agy-pool", file);
+
+  function setupAccount(dir: string, opts: { label?: string; gemini5h: number; acpMode?: string }) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "antigravity-oauth-token"), "{}");
+    writeFileSync(path.join(dir, "fake-usage.json"), usageJson(opts.gemini5h));
+    if (opts.label) writeFileSync(path.join(dir, "fake-name"), opts.label);
+    if (opts.acpMode) writeFileSync(path.join(dir, "fake-acp-mode"), opts.acpMode);
+  }
+
+  function startRelay(threadId: string) {
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("BB_") && !k.startsWith("AGY_")));
+    const child = spawn(launcher, ["acp"], {
+      env: {
+        ...base,
+        HOME: home,
+        BB_THREAD_ID: threadId,
+        BB_ANTIGRAVITY_EXECUTABLE: fakeBin,
+        AGY_FAKE_ACP_LOG: logFile,
+      } as NodeJS.ProcessEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    const messages: any[] = [];
+    const waiters: Array<(msg: any) => void> = [];
+    let stderr = "";
+    child.stderr!.on("data", (d) => (stderr += String(d)));
+    readline.createInterface({ input: child.stdout!, crlfDelay: Infinity }).on("line", (line) => {
+      if (!line.trim()) return;
+      const msg = JSON.parse(line);
+      messages.push(msg);
+      const next = waiters.shift();
+      if (next) next(msg);
+    });
+    const send = (obj: Record<string, unknown>) => child.stdin!.write(`${JSON.stringify(obj)}\n`);
+    const nextMatching = async (pred: (m: any) => boolean) => {
+      let idx = 0;
+      while (true) {
+        while (idx < messages.length) {
+          if (pred(messages[idx])) return messages[idx];
+          idx++;
+        }
+        await new Promise<void>((resolve) => waiters.push(() => resolve()));
+      }
+    };
+    return { child, messages, send, nextMatching, getStderr: () => stderr };
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "agy-relay-"));
+    home = path.join(root, "home");
+    logFile = path.join(root, "acp.log");
+    children = [];
+  });
+
+  afterEach(() => {
+    for (const child of children) {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("transparently swaps to another account on quota refusal, replays settings, and preserves the session", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+
+    const r = startRelay("thr_swap_1");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const created = await r.nextMatching((m) => m.id === 2);
+    const sid = created.result.sessionId;
+
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/set_model", params: { sessionId: sid, modelId: "gemini-4-neon-high" } });
+    await r.nextMatching((m) => m.id === 3);
+
+    r.send({ jsonrpc: "2.0", id: 4, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Hello!" }] } });
+    const done = await r.nextMatching((m) => m.id === 4);
+    expect(done.result.stopReason).toBe("end_turn");
+
+    const chunks = r.messages
+      .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
+      .map((m) => m.params.update.content.text);
+    expect(chunks).toEqual(["ANSWER(default):Hello!"]);
+
+    const bindings = JSON.parse(readFileSync(statePath("bindings.json"), "utf8"));
+    expect(bindings.threads.thr_swap_1.account).toBe("default");
+    const exhausted = JSON.parse(readFileSync(statePath("exhausted.json"), "utf8"));
+    expect(exhausted.accounts.alt).toBeTruthy();
+
+    const logEntries = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(logEntries.some((e) => e.account === "default" && e.method === "session/load" && e.params.sessionId === sid)).toBe(true);
+    expect(logEntries.some((e) => e.account === "default" && e.method === "session/set_model")).toBe(true);
+  });
+
+  it("sends a continuation prompt when quota hits mid-turn after output", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "midturn-quota" });
+
+    const r = startRelay("thr_swap_mid");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Do work" }] } });
+    await r.nextMatching((m) => m.id === 3);
+
+    const chunks = r.messages
+      .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
+      .map((m) => m.params.update.content.text);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toContain("ANSWER(default):The previous reply was cut off by an account quota limit");
+  });
+
+  it("swaps on JSON-RPC quota error responses too", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "rpc-quota-error" });
+
+    const r = startRelay("thr_swap_rpc");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Ping" }] } });
+    const done = await r.nextMatching((m) => m.id === 3);
+    expect(done.result.stopReason).toBe("end_turn");
+
+    const chunks = r.messages
+      .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
+      .map((m) => m.params.update.content.text);
+    expect(chunks).toEqual(["ANSWER(default):Ping"]);
+  });
+
+  it("does not swap when an agent merely mentions quota reached in normal prose", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "prose-mention" });
+
+    const r = startRelay("thr_no_false_swap");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Explain" }] } });
+    await r.nextMatching((m) => m.id === 3);
+
+    const bindings = JSON.parse(readFileSync(statePath("bindings.json"), "utf8"));
+    expect(bindings.threads.thr_no_false_swap.account).toBe("alt");
+    expect(existsSync(statePath("exhausted.json"))).toBe(false);
+  });
+
+  it("forwards the quota refusal cleanly when every account is exhausted", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "quota" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+
+    const r = startRelay("thr_all_out");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Hi" }] } });
+    const done = await r.nextMatching((m) => m.id === 3);
+    expect(done.result.stopReason).toBe("end_turn");
+
+    const chunks = r.messages
+      .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
+      .map((m) => m.params.update.content.text);
+    expect(chunks.join("")).toContain("Individual quota reached");
+  });
+});

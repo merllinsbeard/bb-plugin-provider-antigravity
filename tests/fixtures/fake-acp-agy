@@ -1,0 +1,122 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+
+const home = process.env.HOME;
+const stateDir = path.join(home, ".gemini", "antigravity-cli");
+const name = fs.existsSync(path.join(stateDir, "fake-name"))
+  ? fs.readFileSync(path.join(stateDir, "fake-name"), "utf8").trim()
+  : "default";
+
+if (process.argv[2] === "-p") {
+  const usageFile = path.join(stateDir, "fake-usage.json");
+  process.stdout.write(fs.readFileSync(usageFile, "utf8"));
+  process.exit(0);
+}
+
+const mode = fs.existsSync(path.join(stateDir, "fake-acp-mode"))
+  ? fs.readFileSync(path.join(stateDir, "fake-acp-mode"), "utf8").trim()
+  : "ok";
+const logFile = process.env.AGY_FAKE_ACP_LOG;
+const record = (entry) => {
+  if (logFile) fs.appendFileSync(logFile, JSON.stringify({ account: name, ...entry }) + "\n");
+};
+const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  record({ method: msg.method, params: msg.params });
+  if (msg.method === "initialize") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+  } else if (msg.method === "session/new") {
+    const sid = "sess-123";
+    fs.mkdirSync(path.join(stateDir, "conversations"), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, "conversations", sid + ".db"), "history-from-" + name);
+    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
+  } else if (msg.method === "session/load") {
+    const sid = msg.params.sessionId;
+    const convFile = path.join(stateDir, "conversations", sid + ".db");
+    if (!fs.existsSync(convFile)) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "session not found" } });
+      return;
+    }
+    send({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: sid, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "REPLAYED_OLD_CHUNK" } } },
+    });
+    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
+  } else if (msg.method && msg.method.startsWith("session/set_")) {
+    send({ jsonrpc: "2.0", id: msg.id, result: {} });
+  } else if (msg.method === "session/prompt") {
+    const sid = msg.params.sessionId;
+    const promptText = msg.params.prompt?.[0]?.text ?? "";
+    if (mode === "quota") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h18m19s.\n",
+            },
+          },
+        },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+    } else if (mode === "midturn-quota") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId: sid, update: { sessionUpdate: "tool_call", title: "read_file" } },
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "\n⚠ Individual quota reached. Resets in 1h0m0s.\n" },
+          },
+        },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+    } else if (mode === "rpc-quota-error") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: 429, message: "RESOURCE_EXHAUSTED: Individual quota reached. Resets in 20m." },
+      });
+    } else if (mode === "prose-mention") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "The log says Individual quota reached when the 5h window fills." },
+          },
+        },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+    } else {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ANSWER(" + name + "):" + promptText } },
+        },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+    }
+  }
+});

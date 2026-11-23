@@ -12,11 +12,13 @@ import {
   listAccounts,
   parseAccountName,
   poolPaths,
+  shareConversations,
   type Account,
   type Command,
 } from "./account.ts";
 import { PROXY_FILE, parseProxyUrl, type ProxyRoute } from "./egress.ts";
 import { liveThreadCounts, readBindings } from "./bindings.ts";
+import { exhaustionFile, markExhausted, readExhausted } from "./exhaustion.ts";
 import { resolveAccount } from "./launcher.ts";
 import { probeAccount } from "./probe-account.ts";
 
@@ -58,9 +60,16 @@ function checkProxy(name: string, route: ProxyRoute): void {
   process.stderr.write(`agy-pool: account "${name}" goes out through ${route.endpoint} as ${exit.query} (${exit.countryCode ?? "unknown country"}).\n`);
 }
 
-async function resolve(pidArg: string | undefined): Promise<void> {
+async function resolve(pidArg: string | undefined, exhaustArgs: readonly string[]): Promise<void> {
   const pid = Number(pidArg);
   if (!Number.isInteger(pid) || pid <= 0) fail("agy-pool: resolve needs the launcher pid.");
+  if (exhaustArgs.length > 0) {
+    const [rawAccount, rawMs] = exhaustArgs;
+    const exhaustedAccount = parseAccountName(rawAccount ?? "");
+    const resetMs = Number(rawMs);
+    if (exhaustedAccount !== null && Number.isFinite(resetMs) && resetMs > 0)
+      markExhausted(exhaustionFile(paths.bindingsFile), exhaustedAccount, new Date(Date.now() + resetMs));
+  }
   const agy = requireAgy();
   const resolution = await resolveAccount(
     {
@@ -69,6 +78,7 @@ async function resolve(pidArg: string | undefined): Promise<void> {
         const outcome = await probeAccount(paths, account, () => agy);
         return outcome.ok ? outcome.quota : null;
       },
+      exhausted: readExhausted(exhaustionFile(paths.bindingsFile), new Date()),
     },
     {
       threadId: process.env.BB_THREAD_ID || null,
@@ -77,7 +87,9 @@ async function resolve(pidArg: string | undefined): Promise<void> {
     },
   );
   if (!resolution.ok) fail(resolution.message);
-  printPrefix(accountCommand(paths, resolution.account, agy, []));
+  shareConversations(paths, resolution.account);
+  const command = accountCommand(paths, resolution.account, agy, [], { shareConversations: true });
+  printPrefix({ ...command, env: { ...command.env, AGY_POOL_RESOLVED: resolution.account.name } });
 }
 
 const LOGIN_USAGE = "agy-pool: usage `agy-pool login <name> [--proxy <url>]`; a name is 1-16 of a-z, 0-9, _ and -.";
@@ -141,7 +153,7 @@ async function list(): Promise<void> {
 const [command, arg, ...more] = process.argv.slice(2);
 switch (command) {
   case "resolve":
-    await resolve(arg);
+    await resolve(arg, more);
     break;
   case "prepare-login":
     prepareLogin([arg ?? "", ...more]);

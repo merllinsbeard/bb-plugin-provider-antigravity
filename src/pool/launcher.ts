@@ -1,6 +1,7 @@
 import type { ProviderQuota } from "../usage/types.ts";
 import {
   DEFAULT_ACCOUNT,
+  type AccountName,
   isAuthenticated,
   isUsable,
   listAccounts,
@@ -23,6 +24,8 @@ export type ResolvePorts = {
   readonly readQuota: (account: Account) => Promise<ProviderQuota | null>;
   readonly isAlive?: (threadId: string, pid: number) => boolean;
   readonly now?: () => Date;
+  /** Accounts agy refused for quota, with the time each is usable again (`exhaustion.ts`). */
+  readonly exhausted?: ReadonlyMap<AccountName, string>;
 };
 
 export type Resolution =
@@ -58,14 +61,27 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
     writeBindings(ports.paths.bindingsFile, next);
     return { ok: true as const, account };
   };
-  if (bound) {
+  const exhausted = ports.exhausted ?? new Map<AccountName, string>();
+  // A thread keeps its account until agy refuses it for quota. Conversations
+  // live in one store shared by every account, so moving is lossless.
+  if (bound && !exhausted.has(bound.account)) {
     const account = byName(accounts, bound.account);
     if (!account)
       return { ok: false, message: `agy-pool: thread ${threadId} is bound to account "${bound.account}", which no longer exists.` };
     const resolved = launchable(account);
     return resolved.ok ? record(resolved.account, bound.boundAt) : resolved;
   }
-  const authenticated = accounts.filter(isUsable).filter(isAuthenticated);
+  const signedIn = accounts.filter(isUsable).filter(isAuthenticated);
+  const authenticated = signedIn.filter((account) => !exhausted.has(account.name));
+  if (authenticated.length === 0 && signedIn.length > 0) {
+    const [nearest] = [...exhausted].sort((a, b) => a[1].localeCompare(b[1]));
+    return {
+      ok: false,
+      message: nearest
+        ? `agy-pool: every Antigravity account is out of quota. The nearest reset is ${nearest[1]} (account "${nearest[0]}").`
+        : "agy-pool: every Antigravity account is out of quota.",
+    };
+  }
   const live = liveThreadCounts(bindings, ports.isAlive);
   const candidates = await Promise.all(
     authenticated.map(async (account) => ({

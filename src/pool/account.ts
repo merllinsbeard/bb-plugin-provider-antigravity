@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
@@ -84,12 +84,48 @@ export function readAccountEmail(account: Account): string | null {
   }
 }
 
-export function accountCommand(paths: PoolPaths, account: UsableAccount, agy: string, args: readonly string[]): Command {
+/**
+ * agy keeps each conversation as `conversations/<id>.db` (SQLite, with
+ * `-wal`/`-shm`/`-journal` sidecars), `brain/<id>/` and `annotations/<id>.pbtxt`.
+ * Every account sees the default account's folders, so a thread can move to
+ * another account and `session/load` finds its history there.
+ */
+export const SHARED_DIRS = ["conversations", "brain", "annotations"] as const;
+
+export function accountCommand(
+  paths: PoolPaths,
+  account: UsableAccount,
+  agy: string,
+  args: readonly string[],
+  options?: { readonly shareConversations?: boolean },
+): Command {
   const env = routeEnv(account.egress);
   if (account.name === DEFAULT_ACCOUNT) return { command: agy, args, env };
+  const shared = options?.shareConversations
+    ? SHARED_DIRS.flatMap((dir) => ["--bind", path.join(paths.agyStateDir, dir), path.join(paths.agyStateDir, dir)])
+    : [];
   return {
     command: "bwrap",
-    args: ["--dev-bind", "/", "/", "--bind", account.dir, paths.agyStateDir, agy, ...args],
+    args: ["--dev-bind", "/", "/", "--bind", account.dir, paths.agyStateDir, ...shared, agy, ...args],
     env,
   };
+}
+
+/**
+ * Moves conversations an added account wrote into its own folders (before the
+ * store was shared) into the shared store, then makes sure every shared folder
+ * exists. An id the store already holds stays where it is. Idempotent.
+ */
+export function shareConversations(paths: PoolPaths, account: Account): void {
+  for (const dir of SHARED_DIRS) {
+    const store = path.join(paths.agyStateDir, dir);
+    mkdirSync(store, { recursive: true });
+    if (account.name === DEFAULT_ACCOUNT) continue;
+    const own = path.join(account.dir, dir);
+    if (!isDirectory(own)) continue;
+    for (const entry of readdirSync(own)) {
+      const target = path.join(store, entry);
+      if (!existsSync(target)) renameSync(path.join(own, entry), target);
+    }
+  }
 }

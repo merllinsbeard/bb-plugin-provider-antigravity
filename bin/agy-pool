@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cli="$(dirname "$(readlink -f "$0")")/../src/pool/cli.ts"
+pool_dir="$(dirname "$(readlink -f "$0")")/../src/pool"
+cli="$pool_dir/cli.ts"
 
 launch() {
   local -a lines
@@ -22,10 +23,4 @@ case "${1:-}" in
     ;;
 esac
 
-state="${AGY_POOL_STATE_DIR:-$HOME/.local/state/agy-pool}"
-mkdir -p "$state"
-exec 9>>"$state/bindings.lock"
-flock 9
-prefix=$(node "$cli" resolve "$$")
-exec 9>&-
-launch "$prefix" "$@"
+exec node "$pool_dir/relay.ts" "$@"

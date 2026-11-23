@@ -244,8 +244,10 @@ describe("agy-pool launcher", () => {
     const exited = new Promise((resolve) => child.once("exit", resolve));
     child.kill("SIGTERM");
     await exited;
-    process.kill(-child.pid!, "SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      process.kill(-child.pid!, "SIGTERM");
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 200));
     expect(readFileSync(log, "utf8")).toContain("term alt");
   });
 
@@ -285,9 +287,13 @@ describe("agy-pool launcher", () => {
     account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
     const { child, line } = await serve("thr_argv");
     expect(line).toContain(proxied(PROXY));
-    const argv = readFileSync(`/proc/${child.pid}/cmdline`, "utf8");
-    expect(argv).toContain("bwrap");
-    expect(argv).not.toContain("s3cret");
+    const relayArgv = readFileSync(`/proc/${child.pid}/cmdline`, "utf8");
+    expect(relayArgv).not.toContain("s3cret");
+    const childPid = readFileSync(`/proc/${child.pid}/task/${child.pid}/children`, "utf8").trim().split(/\s+/)[0];
+    expect(childPid).toBeTruthy();
+    const bwrapArgv = readFileSync(`/proc/${childPid}/cmdline`, "utf8");
+    expect(bwrapArgv).toContain("bwrap");
+    expect(bwrapArgv).not.toContain("s3cret");
   });
 
   it("never picks or launches an account whose proxy file is malformed", async () => {
