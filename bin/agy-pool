@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cli="$(dirname "$(readlink -f "$0")")/../src/pool/cli.ts"
+
+case "${1:-}" in
+  list) exec node "$cli" list ;;
+  login)
+    prefix=$(node "$cli" prepare-login "${2:-}")
+    mapfile -t cmd <<<"$prefix"
+    exec "${cmd[@]}" acp --login
+    ;;
+esac
+
+state="${AGY_POOL_STATE_DIR:-$HOME/.local/state/agy-pool}"
+mkdir -p "$state"
+exec 9>>"$state/bindings.lock"
+flock 9
+prefix=$(node "$cli" resolve "$$")
+exec 9>&-
+mapfile -t cmd <<<"$prefix"
+exec "${cmd[@]}" "$@"
