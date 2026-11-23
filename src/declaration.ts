@@ -43,6 +43,13 @@ export function antigravityDeclaration(): PluginProviderDeclaration {
     },
     reasoningLevels: REASONING_LEVELS,
     composerActions: [],
+    experimental_nativeSkillRoots: {
+      user: [{ path: ".agents/skills" }, { path: ".gemini/antigravity/skills" }, { path: ".gemini/skills" }],
+      project: [
+        { path: ".agents/skills", ancestors: true },
+        { path: ".gemini/skills", ancestors: true },
+      ],
+    },
     strings: {
       signInHint: "Sign in to Google Antigravity on this machine with `agy acp --login`, then reload.",
       expiredHint: "Your Google Antigravity sign-in expired. Run `agy acp --login` on this machine, then reload.",
