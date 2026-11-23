@@ -2,8 +2,12 @@
   "name": "bb-plugin-provider-antigravity",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
-  "description": "Runs Google Antigravity over ACP and reports live account quota via the documented agy CLI.",
+  "license": "MIT",
+  "description": "Runs Google Antigravity over ACP with multi-account quota pooling, per-account proxies, and live usage reporting.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/merllinsbeard/bb-plugin-provider-antigravity.git"
+  },
   "keywords": [
     "bb-plugin"
   ],
