@@ -40,31 +40,9 @@ function untilReset(resetsAt: string | null, now: number) {
   const minutes = Math.max(0, Math.round((Date.parse(resetsAt) - now) / 60_000));
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
-  if (days > 0) return hours > 0 ? `${days}д ${hours}ч` : `${days}д`;
-  if (hours > 0) return minutes % 60 > 0 ? `${hours}ч ${minutes % 60}м` : `${hours}ч`;
-  return `${minutes}м`;
-}
-
-function ago(ms: number) {
-  const minutes = Math.floor(ms / 60_000);
-  return minutes < 1 ? "только что" : `${minutes} мин назад`;
-}
-
-function plural(count: number, one: string, few: string, many: string) {
-  const tens = count % 100;
-  const ones = count % 10;
-  if (tens >= 11 && tens <= 14) return many;
-  if (ones === 1) return one;
-  if (ones >= 2 && ones <= 4) return few;
-  return many;
-}
-
-const MONOGRAM_COLORS = ["#6366f1", "#0d9488", "#8b5cf6", "#0284c7", "#b45309", "#059669", "#db2777", "#4f46e5"];
-
-function monogramColor(name: string) {
-  let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return MONOGRAM_COLORS[hash % MONOGRAM_COLORS.length]!;
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return minutes % 60 > 0 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  return `${minutes}m`;
 }
 
 function tighter(group: Group): Window {
@@ -77,126 +55,94 @@ function quotaProblem(account: PoolAccount): string | null {
     case "ok":
       return null;
     case "signed-out":
-      return `Вход не выполнен. Запусти agy-pool login ${account.name}.`;
+      return `Not signed in. Run agy-pool login ${account.name}.`;
     case "expired":
-      return `Вход истёк. Запусти agy-pool login ${account.name}.`;
+      return `Sign-in expired. Run agy-pool login ${account.name}.`;
     case "not-installed":
-      return "agy не установлен на этой машине.";
+      return "agy is not installed on this machine.";
     case "error":
       return account.quota.message;
   }
 }
 
-function Bar({ percent, label }: { percent: number; label: string }) {
+function threadsLine(account: PoolAccount) {
+  const live = account.liveThreads === 0 ? "No live threads" : `${account.liveThreads} live thread${account.liveThreads === 1 ? "" : "s"}`;
+  return `${live} · ${account.boundThreads} bound`;
+}
+
+function Badge({ children, title }: { children: string; title?: string }) {
   return (
-    <span title={label} className="block h-1 min-w-0 overflow-hidden rounded-full bg-sidebar-border">
+    <span title={title} className="shrink-0 rounded-sm bg-sidebar-border/60 px-1 py-0.5 text-2xs leading-none text-muted-foreground">
+      {children}
+    </span>
+  );
+}
+
+function routeBadge(account: PoolAccount) {
+  const { route } = account;
+  if (route.kind === "proxy") return <Badge title={route.endpoint}>proxy</Badge>;
+  if (route.kind === "direct") return <Badge title="Server address">direct</Badge>;
+  return <Badge title={route.problem}>broken proxy</Badge>;
+}
+
+function Bar({ percent }: { percent: number }) {
+  return (
+    <span className="block h-1 min-w-0 overflow-hidden rounded-full bg-sidebar-border">
       <span
-        className={cx("block h-full rounded-full transition-[width] duration-500", barColor(percent))}
+        className={cx("block h-full rounded-full", barColor(percent))}
         style={{ width: `${Math.max(2, Math.min(100, percent))}%` }}
       />
     </span>
   );
 }
 
-function RouteChip({ account }: { account: PoolAccount }) {
-  const { route } = account;
-  const healthy = account.quota.status === "ok";
-  const [dot, text, title] =
-    route.kind === "proxy"
-      ? [healthy ? "bg-emerald-500" : "bg-destructive", "прокси", `Выход через ${route.endpoint}`]
-      : route.kind === "direct"
-        ? ["bg-muted-foreground/50", "напрямую", "Выход с адреса сервера"]
-        : ["bg-destructive", "прокси сломан", route.problem];
-  return (
-    <span
-      title={title}
-      className="flex shrink-0 items-center gap-1 rounded-full border border-sidebar-border px-1.5 py-0.5 text-2xs leading-none text-muted-foreground"
-    >
-      <span className={cx("size-1.5 rounded-full", dot)} />
-      {text}
-    </span>
-  );
-}
-
-function AccountCard({ account, isNext, now }: { account: PoolAccount; isNext: boolean; now: number }) {
+function AccountSection({ account, isNext, now }: { account: PoolAccount; isNext: boolean; now: number }) {
   const [open, setOpen] = useState(false);
   const problem = quotaProblem(account);
   const groups = account.quota.status === "ok" ? account.quota.groups : [];
-  const main = groups.filter((group) => group.fiveHour !== null);
-  const color = monogramColor(account.name);
+  const counted = groups.filter((group) => group.fiveHour !== null);
   return (
-    <button
-      type="button"
-      onClick={() => setOpen((value) => !value)}
-      aria-expanded={open}
-      className={cx(
-        "flex w-full flex-col gap-2 rounded-lg border p-2.5 text-left transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
-        isNext
-          ? "border-primary/40 bg-primary/[0.04] hover:border-primary/60"
-          : "border-sidebar-border hover:border-muted-foreground/40",
-      )}
+    <section
+      aria-label={account.name}
+      className="col-span-full grid grid-cols-subgrid gap-y-1.5 border-t border-sidebar-border pt-2.5 first:border-t-0 first:pt-0"
     >
-      <span className="flex min-w-0 items-center gap-2">
-        <span
-          className="flex size-6 shrink-0 items-center justify-center rounded-md text-2xs font-semibold"
-          style={{ color, backgroundColor: `color-mix(in srgb, ${color} 16%, transparent)` }}
-        >
-          {account.name.slice(0, 1).toUpperCase()}
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="flex items-center gap-1.5 text-xs font-medium leading-tight text-sidebar-foreground">
-            {account.name}
-            {isNext ? (
-              <span className="rounded-sm bg-primary/15 px-1 py-px text-[0.625rem] font-semibold uppercase leading-none tracking-wide text-primary">
-                next
-              </span>
-            ) : null}
-          </span>
-          <span className="truncate text-2xs leading-tight text-muted-foreground">{account.email ?? "почта неизвестна"}</span>
-        </span>
-        <RouteChip account={account} />
-      </span>
-
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="col-span-full flex h-5 min-w-0 items-center gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+      >
+        <h3 className="min-w-0 flex-1 truncate text-2xs font-medium text-sidebar-foreground">{account.name}</h3>
+        {isNext ? <Badge title="The next new thread goes to this account">next</Badge> : null}
+        {routeBadge(account)}
+      </button>
+      {account.email !== null ? <p className="col-span-full -mt-1 truncate text-2xs text-muted-foreground">{account.email}</p> : null}
       {problem !== null ? (
-        <span className="text-2xs text-muted-foreground">{problem}</span>
+        <p className="col-span-full text-2xs text-muted-foreground">{problem}</p>
       ) : (
-        <span className="grid grid-cols-[max-content_minmax(0,1fr)_max-content_max-content] items-center gap-x-3 gap-y-1.5">
-          {main.map((group) => {
-            const worst = tighter(group);
-            return (
-              <span key={group.name} className="col-span-full grid grid-cols-subgrid items-center text-2xs">
-                <span className="text-muted-foreground">{group.name}</span>
-                <span className="flex flex-col gap-0.5">
-                  <Bar percent={group.fiveHour?.usedPercent ?? 0} label={`5ч: ${group.fiveHour?.usedPercent ?? 0}%`} />
-                  <Bar percent={group.weekly?.usedPercent ?? 0} label={`7д: ${group.weekly?.usedPercent ?? 0}%`} />
-                </span>
-                <span className={cx("text-right tabular-nums", percentColor(worst.usedPercent))}>
-                  {Math.round(worst.usedPercent)}%
-                </span>
-                <span className="min-w-10 text-right tabular-nums text-muted-foreground">{untilReset(worst.resetsAt, now)}</span>
+        counted.map((group) => {
+          const worst = tighter(group);
+          return (
+            <span key={group.name} className="col-span-full grid grid-cols-subgrid items-center text-2xs">
+              <span className="max-w-20 truncate text-muted-foreground">{group.name}</span>
+              <span className="flex flex-col gap-0.5" title={`5h ${group.fiveHour?.usedPercent ?? 0}% · 7d ${group.weekly?.usedPercent ?? 0}%`}>
+                <Bar percent={group.fiveHour?.usedPercent ?? 0} />
+                <Bar percent={group.weekly?.usedPercent ?? 0} />
               </span>
-            );
-          })}
-        </span>
+              <span className={cx("text-right tabular-nums", percentColor(worst.usedPercent))}>{Math.round(worst.usedPercent)}%</span>
+              <span className="min-w-9 text-right tabular-nums text-muted-foreground">{untilReset(worst.resetsAt, now)}</span>
+            </span>
+          );
+        })
       )}
-
-      <span className="flex items-center gap-1.5 text-2xs text-muted-foreground">
-        <span className={cx("size-1.5 rounded-full", account.liveThreads > 0 ? "bg-emerald-500" : "bg-muted-foreground/40")} />
-        {account.liveThreads > 0
-          ? `${account.liveThreads} ${plural(account.liveThreads, "тред работает", "треда работают", "тредов работают")}`
-          : "сейчас без тредов"}
-        <span className="opacity-60">·</span>
-        {account.boundThreads} {plural(account.boundThreads, "привязан", "привязано", "привязано")}
-      </span>
-
-      {open && groups.length > 0 ? (
-        <span className="flex flex-col gap-1 border-t border-dashed border-sidebar-border pt-2 text-2xs text-muted-foreground">
+      <p className="col-span-full text-2xs text-muted-foreground">{threadsLine(account)}</p>
+      {open ? (
+        <div className="col-span-full flex flex-col gap-1 text-2xs text-muted-foreground">
           {groups.flatMap((group) =>
             (
               [
-                ["5ч", group.fiveHour],
-                ["7д", group.weekly],
+                ["5h", group.fiveHour],
+                ["7d", group.weekly],
               ] as const
             ).flatMap(([span, window]) =>
               window === null
@@ -204,10 +150,10 @@ function AccountCard({ account, isNext, now }: { account: PoolAccount; isNext: b
                 : [
                     <span key={`${group.name}-${span}`} className="flex justify-between gap-2">
                       <span>
-                        {group.name} · {span}
+                        {span} · {group.name}
                       </span>
                       <span className="tabular-nums text-sidebar-foreground">
-                        {Math.round(window.usedPercent)}% · сброс через {untilReset(window.resetsAt, now)}
+                        {Math.round(window.usedPercent)}% · resets in {untilReset(window.resetsAt, now)}
                       </span>
                     </span>,
                   ],
@@ -215,29 +161,23 @@ function AccountCard({ account, isNext, now }: { account: PoolAccount; isNext: b
           )}
           {account.route.kind === "proxy" ? (
             <span className="flex justify-between gap-2">
-              <span>Выход</span>
+              <span>Exit</span>
               <span className="tabular-nums text-sidebar-foreground">{account.route.endpoint}</span>
             </span>
           ) : null}
-        </span>
+        </div>
       ) : null}
-    </button>
+    </section>
   );
 }
 
-function NextLine({ pool }: { pool: Pool }) {
-  if (pool.next !== null)
-    return (
-      <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2 py-1.5 text-2xs text-primary">
-        <Icon name="ArrowRight" className="size-3" aria-hidden />
-        Следующий тред уйдёт на <span className="font-semibold">{pool.next}</span>
-      </div>
-    );
+function PoolNotice({ pool }: { pool: Pool }) {
+  if (pool.next !== null) return null;
   const signedIn = pool.accounts.some((account) => account.quota.status === "ok");
   return (
-    <div className="rounded-md bg-warning/10 px-2 py-1.5 text-2xs text-warning">
-      {signedIn ? "Все аккаунты упёрлись в лимит." : "Нет аккаунта с выполненным входом."}
-    </div>
+    <p className="col-span-full mb-1 text-2xs text-warning">
+      {signedIn ? "Every account is out of quota." : "No account is signed in."}
+    </p>
   );
 }
 
@@ -276,14 +216,8 @@ function PoolPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
 
   return (
     <div className="flex min-h-0 flex-col">
-      <div className="flex h-9 min-w-0 shrink-0 items-center gap-1.5 border-b border-sidebar-border px-2.5">
-        <Icon name={POOL_ICON} className="size-3.5 shrink-0 text-sidebar-foreground" aria-hidden />
-        <span className="text-2xs font-medium text-sidebar-foreground">Пул Antigravity</span>
-        {pool !== null ? (
-          <span className="rounded-sm bg-sidebar-border/60 px-1 py-0.5 text-2xs leading-none text-muted-foreground">
-            {pool.accounts.length}
-          </span>
-        ) : null}
+      <div className="flex h-9 min-w-0 shrink-0 items-center gap-1 border-b border-sidebar-border px-1.5">
+        <span className="px-1.5 text-2xs font-medium text-sidebar-foreground">Antigravity pool</span>
         <span className="flex min-w-0 flex-1 justify-end gap-0.5 overflow-x-auto">
           {machines.length > 1
             ? machines.map((candidate) => (
@@ -293,21 +227,19 @@ function PoolPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
                   onClick={() => setSelected(candidate.id)}
                   className={cx(
                     "h-6 shrink-0 rounded-md px-1.5 text-2xs",
-                    candidate.id === machine?.id
-                      ? "bg-sidebar-accent text-sidebar-foreground"
-                      : "text-muted-foreground hover:bg-sidebar-accent",
+                    candidate.id === machine?.id ? "bg-sidebar-accent text-sidebar-foreground" : "text-muted-foreground hover:bg-sidebar-accent",
                   )}
                 >
                   {candidate.name}
                 </button>
               ))
             : machine !== null
-              ? <span className="truncate text-2xs text-muted-foreground">{machine.name}</span>
+              ? <span className="truncate px-1.5 text-2xs text-muted-foreground">{machine.name}</span>
               : null}
         </span>
         <button
           type="button"
-          aria-label="Обновить пул"
+          aria-label="Refresh pool"
           onClick={() => void refresh()}
           disabled={busy}
           className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:opacity-60"
@@ -316,7 +248,7 @@ function PoolPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
         </button>
         <button
           type="button"
-          aria-label="Свернуть пул"
+          aria-label="Collapse pool"
           onClick={dismiss}
           className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
         >
@@ -324,26 +256,25 @@ function PoolPanel({ dismiss }: ExperimentalSidebarFooterDisclosureProps) {
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-col gap-2 overflow-y-auto p-2.5">
+      <div className="min-h-0 overflow-y-auto p-2.5">
         {pool === null ? (
-          <div className="flex flex-col gap-2">
-            {query.isLoading || busy ? (
-              [0, 1].map((row) => <div key={row} className="h-24 animate-pulse rounded-lg bg-sidebar-border/50" />)
-            ) : (
-              <span className="text-2xs text-muted-foreground">{machine?.error ?? "Пул Antigravity не найден ни на одной машине."}</span>
-            )}
-          </div>
+          query.isLoading || busy ? (
+            <div className="flex flex-col gap-2">
+              {[0, 1].map((row) => (
+                <div key={row} className="h-16 animate-pulse rounded-md bg-sidebar-border/50" />
+              ))}
+            </div>
+          ) : (
+            <p className="text-2xs text-muted-foreground">{machine?.error ?? "No Antigravity pool on a connected machine."}</p>
+          )
         ) : (
-          <>
-            <NextLine pool={pool} />
+          <div className="grid grid-cols-[max-content_minmax(0,1fr)_max-content_max-content] gap-x-3 gap-y-2.5">
+            {machine?.error ? <p className="col-span-full text-2xs text-muted-foreground">{machine.error} Showing last update.</p> : null}
+            <PoolNotice pool={pool} />
             {pool.accounts.map((account) => (
-              <AccountCard key={account.name} account={account} isNext={account.name === pool.next} now={now} />
+              <AccountSection key={account.name} account={account} isNext={account.name === pool.next} now={now} />
             ))}
-            <span className="px-0.5 text-2xs text-muted-foreground">
-              {machine?.error !== null && machine?.error !== undefined ? `${machine.error} Показаны прошлые данные. ` : ""}
-              {machine?.observedAt != null ? `Обновлено ${ago(now - machine.observedAt)}` : null}
-            </span>
-          </>
+          </div>
         )}
       </div>
     </div>
@@ -354,7 +285,7 @@ export default definePluginApp((app) => {
   app.experimental_sidebarFooter.register({
     kind: "disclosure",
     id: "pool",
-    label: "Пул Antigravity",
+    label: "Antigravity pool",
     icon: POOL_ICON,
     component: PoolPanel,
   });
