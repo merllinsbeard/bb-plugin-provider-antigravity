@@ -1,5 +1,8 @@
+import { fileURLToPath } from "node:url";
 import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
 import { ANTIGRAVITY } from "./identity.ts";
+
+export const AGY_POOL_LAUNCHER = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
 
 const REASONING_LEVELS = [
   { id: "low", label: "Low" },
@@ -20,7 +23,7 @@ export function antigravityDeclaration(): PluginProviderDeclaration {
       acpDialect: ANTIGRAVITY.dialectId,
       acpLaunchSpec: {
         displayName: ANTIGRAVITY.displayName,
-        command: "agy",
+        command: AGY_POOL_LAUNCHER,
         args: ["acp"],
         env: {},
         permissionCli: { full: ["--dangerously-skip-permissions"], insertAfterArgs: 1 },
