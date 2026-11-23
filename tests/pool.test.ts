@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -314,5 +316,46 @@ describe("agy-pool launcher", () => {
       ["bad", "unusable"],
     ]);
     expect(listed[2].quotaStatus.message).toContain("agy-pool-proxy");
+  });
+
+  describe("login with a proxy", () => {
+    let server: ReturnType<typeof createServer>;
+    let seen: IncomingMessage[];
+
+    beforeEach(async () => {
+      seen = [];
+      server = createServer((req, res) => {
+        seen.push(req);
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "success", countryCode: "NL", query: "203.0.113.7" }));
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    });
+
+    afterEach(() => server.close());
+
+    it("checks the exit IP through the saved proxy, then signs in through it", async () => {
+      const url = `http://pool-user:s3cret@127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const run = await launch({}, ["login", "fresh", "--proxy", url]);
+      expect(run.code).toBe(0);
+      expect(run.stderr).toContain("as 203.0.113.7 (NL)");
+      expect(run.stdout).toMatch(/args=acp --login\|/);
+      expect(run.stdout).toContain(`https_proxy=${url}`);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.headers["proxy-authorization"]).toBe(`Basic ${Buffer.from("pool-user:s3cret").toString("base64")}`);
+      const file = path.join(accountDir("fresh"), "agy-pool-proxy");
+      expect(readFileSync(file, "utf8").trim()).toBe(url);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    });
+
+    it("does not start the sign-in when the proxy does not answer", async () => {
+      const port = (server.address() as AddressInfo).port;
+      await new Promise((resolve) => server.close(resolve));
+      const run = await launch({}, ["login", "fresh", "--proxy", `http://127.0.0.1:${port}`]);
+      expect(run.code).toBe(1);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain(`proxy 127.0.0.1:${port} for account "fresh" does not work`);
+      expect(existsSync(log) && readFileSync(log, "utf8").includes("--login")).toBe(false);
+    });
   });
 });

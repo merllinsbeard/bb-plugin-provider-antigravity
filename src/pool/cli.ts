@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveAgyBinary } from "../usage/probe.ts";
@@ -14,6 +15,7 @@ import {
   type Account,
   type Command,
 } from "./account.ts";
+import { PROXY_FILE, parseProxyUrl, type ProxyRoute } from "./egress.ts";
 import { liveThreadCounts, readBindings } from "./bindings.ts";
 import { resolveAccount } from "./launcher.ts";
 import { probeAccount } from "./probe-account.ts";
@@ -34,6 +36,26 @@ function requireAgy(): string {
 function printPrefix({ command, args, env }: Command): void {
   const exports = Object.entries(env).map(([key, value]) => `${key}=${value}`);
   process.stdout.write([...exports, "--", command, ...args].join("\n"));
+}
+
+const IP_CHECK_URL = "http://ip-api.com/json?fields=status,countryCode,query";
+
+function checkProxy(name: string, route: ProxyRoute): void {
+  const quote = (value: string) => `"${value.replace(/[\\"]/g, "\\$&")}"`;
+  const run = spawnSync("curl", ["--silent", "--show-error", "--max-time", "20", "--config", "-"], {
+    input: `proxy = ${quote(route.url)}\nurl = ${quote(IP_CHECK_URL)}\n`,
+    encoding: "utf8",
+  });
+  let exit: { query?: string; countryCode?: string } | null = null;
+  try {
+    exit = run.status === 0 ? JSON.parse(run.stdout) : null;
+  } catch {}
+  if (!exit?.query)
+    fail(
+      `agy-pool: proxy ${route.endpoint} for account "${name}" does not work (${run.stderr.trim() || run.error?.message || "no answer"}). ` +
+        `It is saved in ${PROXY_FILE}; the sign-in did not start.`,
+    );
+  process.stderr.write(`agy-pool: account "${name}" goes out through ${route.endpoint} as ${exit.query} (${exit.countryCode ?? "unknown country"}).\n`);
 }
 
 async function resolve(pidArg: string | undefined): Promise<void> {
@@ -58,18 +80,30 @@ async function resolve(pidArg: string | undefined): Promise<void> {
   printPrefix(accountCommand(paths, resolution.account, agy, []));
 }
 
-function prepareLogin(raw: string | undefined): void {
-  const name = parseAccountName(raw ?? "") ?? fail("agy-pool: usage `agy-pool login <name>`; a name is 1-16 of a-z, 0-9, _ and -.");
+const LOGIN_USAGE = "agy-pool: usage `agy-pool login <name> [--proxy <url>]`; a name is 1-16 of a-z, 0-9, _ and -.";
+
+function prepareLogin(args: readonly string[]): void {
+  const [raw, flag, proxyArg, ...rest] = args;
+  const name = parseAccountName(raw ?? "") ?? fail(LOGIN_USAGE);
+  if (rest.length > 0 || (flag !== undefined && (flag !== "--proxy" || proxyArg === undefined))) fail(LOGIN_USAGE);
+  const proxy = proxyArg === undefined ? null : parseProxyUrl(proxyArg);
+  if (proxy?.kind === "invalid") fail(`agy-pool: the proxy URL ${proxy.problem}.`);
   const agy = requireAgy();
   const dir = name === DEFAULT_ACCOUNT ? paths.agyStateDir : path.join(paths.accountsRoot, name);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (name !== DEFAULT_ACCOUNT) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const settings = path.join(paths.agyStateDir, "settings.json");
     const copy = path.join(dir, "settings.json");
     if (existsSync(settings) && !existsSync(copy)) copyFileSync(settings, copy);
   }
+  if (proxy !== null) {
+    const file = path.join(dir, PROXY_FILE);
+    writeFileSync(file, `${proxy.url}\n`, { mode: 0o600 });
+    chmodSync(file, 0o600);
+  }
   const account = readAccount(name, dir);
   if (!isUsable(account)) fail(`agy-pool: account "${name}" is unusable: ${account.egress.problem}`);
+  if (account.egress.kind === "proxy") checkProxy(name, account.egress);
   printPrefix(accountCommand(paths, account, agy, []));
 }
 
@@ -104,13 +138,13 @@ async function list(): Promise<void> {
   process.stdout.write(`${JSON.stringify({ bindingsFile: paths.bindingsFile, accounts }, null, 2)}\n`);
 }
 
-const [command, arg] = process.argv.slice(2);
+const [command, arg, ...more] = process.argv.slice(2);
 switch (command) {
   case "resolve":
     await resolve(arg);
     break;
   case "prepare-login":
-    prepareLogin(arg);
+    prepareLogin([arg ?? "", ...more]);
     break;
   case "list":
     await list();
