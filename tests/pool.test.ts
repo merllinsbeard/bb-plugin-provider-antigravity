@@ -61,10 +61,18 @@ function quota(f: Fractions): ProviderQuota {
 const name = (raw: string) => raw as AccountName;
 
 describe("pickAccount", () => {
-  it("picks the account whose best model group has the most room", () => {
+  it("picks the account with more remaining quota across model groups", () => {
     const pick = pickAccount([
       { name: name("default"), quota: quota({ gemini5h: 0.3, geminiWeekly: 0.9 }), liveThreads: 0 },
       { name: name("alt"), quota: quota({ gemini5h: 0.9, geminiWeekly: 0.1, other5h: 0.5, otherWeekly: 0.6 }), liveThreads: 3 },
+    ]);
+    expect(pick).toEqual({ ok: true, account: "alt" });
+  });
+
+  it("balances Gemini usage even when Claude/GPT is untouched on every account", () => {
+    const pick = pickAccount([
+      { name: name("default"), quota: quota({ gemini5h: 0.48, geminiWeekly: 0.38, other5h: 1, otherWeekly: 1 }), liveThreads: 0 },
+      { name: name("alt"), quota: quota({ gemini5h: 1, geminiWeekly: 1, other5h: 1, otherWeekly: 1 }), liveThreads: 0 },
     ]);
     expect(pick).toEqual({ ok: true, account: "alt" });
   });

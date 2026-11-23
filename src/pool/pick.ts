@@ -31,7 +31,9 @@ function modelGroups(quota: ProviderQuota) {
 export function accountScore(quota: ProviderQuota | null): number | null {
   const groups = quota === null ? [] : modelGroups(quota);
   if (groups.length === 0) return null;
-  return Math.max(...groups.map((buckets) => Math.min(...buckets.map((bucket) => Math.max(0, bucket.remainingFraction)))));
+  const groupScores = groups.map((buckets) => Math.min(...buckets.map((bucket) => Math.max(0, bucket.remainingFraction))));
+  if (Math.max(...groupScores) === 0) return 0;
+  return groupScores.reduce((sum, value) => sum + value, 0) / groupScores.length;
 }
 
 function usableAgainAt(quota: ProviderQuota): string | null {
