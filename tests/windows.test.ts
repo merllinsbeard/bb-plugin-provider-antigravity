@@ -26,11 +26,11 @@ function bucket(overrides: Partial<ProviderQuotaBucket>): ProviderQuotaBucket {
 describe("toQuotaWindows", () => {
   it("turns the live fixture into five unique custom windows in provider order", () => {
     expect(toQuotaWindows(liveQuota())).toEqual([
-      { id: "gemini-weekly", kind: "custom", label: "Gemini · Weekly", usedPercent: 39.9, resetsAt: "2026-11-28T15:54:51.000Z" },
-      { id: "gemini-5h", kind: "custom", label: "Gemini · 5h", usedPercent: 76.3, resetsAt: "2026-11-23T11:13:01.000Z" },
-      { id: "3p-weekly", kind: "custom", label: "Claude & GPT · Weekly", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
-      { id: "3p-5h", kind: "custom", label: "Claude & GPT · 5h", usedPercent: 0, resetsAt: "2026-11-23T14:23:21.000Z" },
-      { id: "gemini-argon-wtu-weekly", kind: "custom", label: "Gemini 4 Argon · Weekly", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
+      { id: "gemini-weekly", kind: "custom", label: "7d · Gemini", usedPercent: 39.9, resetsAt: "2026-11-28T15:54:51.000Z" },
+      { id: "gemini-5h", kind: "custom", label: "5h · Gemini", usedPercent: 76.3, resetsAt: "2026-11-23T11:13:01.000Z" },
+      { id: "3p-weekly", kind: "custom", label: "7d · Claude/GPT", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
+      { id: "3p-5h", kind: "custom", label: "5h · Claude/GPT", usedPercent: 0, resetsAt: "2026-11-23T14:23:21.000Z" },
+      { id: "gemini-argon-wtu-weekly", kind: "custom", label: "7d · Argon", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
     ]);
   });
 
@@ -62,9 +62,9 @@ describe("toQuotaWindows", () => {
       ],
     });
     expect(windows.map((window) => window.label)).toEqual([
-      "Flash · Daily",
-      "Flash · Monthly Burst",
-      "Flash · Limit",
+      "1d · Flash",
+      "Monthly Burst · Flash",
+      "Limit · Flash",
     ]);
   });
 
@@ -77,9 +77,9 @@ describe("toQuotaWindows", () => {
     };
     const windows = toQuotaWindows(quota);
     expect(windows.map(({ id, label }) => ({ id, label }))).toEqual([
-      { id: "w", label: "Gemini · Weekly" },
-      { id: "w-2", label: "Gemini · Weekly (2)" },
-      { id: "w-3", label: "Gemini · Weekly (3)" },
+      { id: "w", label: "7d · Gemini" },
+      { id: "w-2", label: "7d · Gemini (2)" },
+      { id: "w-3", label: "7d · Gemini (3)" },
     ]);
     expect(toQuotaWindows(quota)).toEqual(windows);
   });

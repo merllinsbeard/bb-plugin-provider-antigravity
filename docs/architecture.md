@@ -22,6 +22,6 @@ We therefore ship only the native print-mode JSON reader and drop the PTY/TUI la
   2. Clamp `usedPercent` to `0..100` (`Math.min(100, Math.max(0, round1((1 - remaining) * 100)))`) to match the bridge `providerUsageWindowSchema` contract.
   3. Resolve `agy` via `BB_ANTIGRAVITY_EXECUTABLE` -> `experimental_hostToolchain.resolve("agy")` -> `~/.local/bin/agy`, checking executable permission (`X_OK`).
   4. Preserve provider bucket IDs (`gemini-weekly`, `gemini-5h`, `3p-weekly`, `3p-5h`, `gemini-argon-wtu-weekly`) through bridge passthrough into `usage-source.ts` (fallback `${index}:${label}`).
-  5. Keep `kind: "custom"` with concise unique labels (`Gemini · Weekly`, `Gemini · 5h`, `Claude & GPT · Weekly`, `Claude & GPT · 5h`, `Gemini 4 Argon · Weekly`) so `bb settings usage` and `bb--provider-usage` show identical text and React keys never collide.
+  5. Keep `kind: "custom"` with concise period-first labels (`7d · Gemini`, `5h · Gemini`, `7d · Claude/GPT`, `5h · Claude/GPT`, `7d · Argon`) so `bb settings usage` and `bb--provider-usage` show identical text, React keys never collide, and narrow sidebar/mobile rows never truncate the period.
   6. Keep in-process `withSingleFlight` around `probeQuota` in `host.ts` so concurrent `bb settings usage --refresh` and `bb--provider-usage` calls share one `agy` process.
   7. Never read or log token contents (`existsSync` presence check on `~/.gemini/antigravity-cli/antigravity-oauth-token` avoids `agy`'s 60 s interactive OAuth wait); `readAccount()` never spawns.

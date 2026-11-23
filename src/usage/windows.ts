@@ -1,6 +1,6 @@
 import type { ProviderQuota, ProviderQuotaBucket, QuotaWindow } from "./types.js";
 
-const SPAN_LABELS = { weekly: "Weekly", "5h": "5h", daily: "Daily" } as const;
+const SPAN_LABELS = { weekly: "7d", "5h": "5h", daily: "1d" } as const;
 
 export function round1(value: number): number {
   return Math.round(value * 10) / 10;
@@ -11,14 +11,17 @@ function clean(text: string): string {
 }
 
 function groupLabel(name: string): string {
-  return clean(name).replace(/\s+models?$/i, "").replace(/\s+and\s+/i, " & ");
+  return clean(name)
+    .replace(/\s+models?$/i, "")
+    .replace(/\s+and\s+/i, "/")
+    .replace(/^Gemini\s+\d+\s+(?=\S)/i, "");
 }
 
 export function labelFor(groupName: string, bucket: ProviderQuotaBucket): string {
   const span =
     bucket.window === "other" ? clean(bucket.name) || "Limit" : SPAN_LABELS[bucket.window];
   const group = groupLabel(groupName);
-  return group ? `${group} · ${span}` : span;
+  return group ? `${span} · ${group}` : span;
 }
 
 export function claimLabel(label: string, taken: Set<string>): string {

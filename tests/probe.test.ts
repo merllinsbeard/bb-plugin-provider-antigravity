@@ -35,11 +35,11 @@ describe("probeQuota", () => {
       expect(outcome.reading.accountEmail).toBeNull();
       expect(outcome.reading.planLabel).toBeNull();
       expect(outcome.reading.windows.map((window) => window.label)).toEqual([
-        "Gemini · Weekly",
-        "Gemini · 5h",
-        "Claude & GPT · Weekly",
-        "Claude & GPT · 5h",
-        "Gemini 4 Argon · Weekly",
+        "7d · Gemini",
+        "5h · Gemini",
+        "7d · Claude/GPT",
+        "5h · Claude/GPT",
+        "7d · Argon",
       ]);
     }
   });

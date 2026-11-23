@@ -17,11 +17,11 @@ type Handlers = Record<string, (input: unknown) => Promise<unknown>>;
 const okUsage = (windows: unknown[]): HostUsage => ({ status: "ok", accountEmail: null, planLabel: null, windows });
 
 const LIVE_WINDOWS = [
-  { id: "gemini-weekly", kind: "custom", model: null, label: "Gemini · Weekly", usedPercent: 39.9, resetsAt: "2026-11-28T15:54:51.000Z" },
-  { id: "gemini-5h", kind: "custom", model: null, label: "Gemini · 5h", usedPercent: 76.3, resetsAt: "2026-11-23T11:13:01.000Z" },
-  { id: "3p-weekly", kind: "custom", model: null, label: "Claude & GPT · Weekly", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
-  { id: "3p-5h", kind: "custom", model: null, label: "Claude & GPT · 5h", usedPercent: 0, resetsAt: "2026-11-23T14:23:21.000Z" },
-  { id: "gemini-argon-wtu-weekly", kind: "custom", model: null, label: "Gemini 4 Argon · Weekly", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
+  { id: "gemini-weekly", kind: "custom", model: null, label: "7d · Gemini", usedPercent: 39.9, resetsAt: "2026-11-28T15:54:51.000Z" },
+  { id: "gemini-5h", kind: "custom", model: null, label: "5h · Gemini", usedPercent: 76.3, resetsAt: "2026-11-23T11:13:01.000Z" },
+  { id: "3p-weekly", kind: "custom", model: null, label: "7d · Claude/GPT", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
+  { id: "3p-5h", kind: "custom", model: null, label: "5h · Claude/GPT", usedPercent: 0, resetsAt: "2026-11-23T14:23:21.000Z" },
+  { id: "gemini-argon-wtu-weekly", kind: "custom", model: null, label: "7d · Argon", usedPercent: 0, resetsAt: "2026-11-30T09:23:21.000Z" },
 ];
 
 function setup() {
@@ -131,10 +131,10 @@ describe("Antigravity usage source", () => {
 
   it("falls back to an index-based window id when the host omits one", async () => {
     const source = setup();
-    source.state.next = async () => okUsage([{ label: "Gemini · Weekly", usedPercent: 10, resetsAt: null }]);
+    source.state.next = async () => okUsage([{ label: "7d · Gemini", usedPercent: 10, resetsAt: null }]);
     const measurement = await source.read();
     expect(measurement.usage).toMatchObject({
-      windows: [{ id: "0:Gemini · Weekly", kind: "custom", model: null, label: "Gemini · Weekly" }],
+      windows: [{ id: "0:7d · Gemini", kind: "custom", model: null, label: "7d · Gemini" }],
     });
   });
 
