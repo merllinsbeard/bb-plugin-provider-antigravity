@@ -62,3 +62,7 @@ export function toQuotaWindows(quota: ProviderQuota): QuotaWindow[] {
   assertUniqueWindows(windows);
   return windows;
 }
+
+export function accountWindows(account: string, windows: readonly QuotaWindow[]): QuotaWindow[] {
+  return windows.map((window) => ({ ...window, id: `${account}:${window.id}`, label: `${account} ${window.label}` }));
+}

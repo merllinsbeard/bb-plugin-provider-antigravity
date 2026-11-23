@@ -117,6 +117,34 @@ describe("host bridge", () => {
     });
   });
 
+  it("reports every signed-in account with its name on each window", async () => {
+    signIn();
+    const alt = path.join(home, ".local", "share", "agy-accounts", "alt");
+    mkdirSync(alt, { recursive: true });
+    writeFileSync(path.join(alt, "antigravity-oauth-token"), "");
+    const live = JSON.parse(readFileSync(new URL("./fixtures/usage-live.json", import.meta.url), "utf8"));
+    live.command.data.groups[0].buckets[1].remaining_fraction = 0.9;
+    writeFileSync(path.join(alt, "fake-usage.json"), JSON.stringify(live));
+    mkdirSync(path.join(home, ".local", "share", "agy-accounts", "empty"));
+
+    const result = providerUsageResultSchema.parse(await request("provider/usage"));
+    if (!result.supported || result.usage.status !== "ok") throw new Error(`usage not ok: ${JSON.stringify(result)}`);
+    const rows = result.usage.windows.map((window) => [window.id, window.label, window.usedPercent]);
+    expect(rows).toEqual([
+      ["default:gemini-weekly", "default 7d · Gemini", 39.9],
+      ["default:gemini-5h", "default 5h · Gemini", 76.3],
+      ["default:3p-weekly", "default 7d · Claude/GPT", 0],
+      ["default:3p-5h", "default 5h · Claude/GPT", 0],
+      ["default:gemini-argon-wtu-weekly", "default 7d · Argon", 0],
+      ["alt:gemini-weekly", "alt 7d · Gemini", 39.9],
+      ["alt:gemini-5h", "alt 5h · Gemini", 10],
+      ["alt:3p-weekly", "alt 7d · Claude/GPT", 0],
+      ["alt:3p-5h", "alt 5h · Claude/GPT", 0],
+      ["alt:gemini-argon-wtu-weekly", "alt 7d · Argon", 0],
+    ]);
+    expect(usageCalls()).toHaveLength(2);
+  });
+
   it("shares one agy run between concurrent usage requests", async () => {
     signIn();
     const [a, b] = await Promise.all([request("provider/usage"), request("provider/usage")]);

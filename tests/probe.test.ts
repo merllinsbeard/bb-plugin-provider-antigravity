@@ -1,11 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createPrintRunner,
-  hasAuthToken,
   probeQuota,
   resolveAgyBinary,
   withSingleFlight,
@@ -165,20 +164,6 @@ describe("resolveAgyBinary", () => {
 
   it("returns null when no candidate is executable", () => {
     expect(resolveAgyBinary({ BB_ANTIGRAVITY_EXECUTABLE: notExecutable }, "/nowhere", noPath)).toBeNull();
-  });
-});
-
-describe("hasAuthToken", () => {
-  it("detects the sign-in token by presence only", () => {
-    const home = mkdtempSync(path.join(tmpdir(), "agy-home-"));
-    try {
-      expect(hasAuthToken(home)).toBe(false);
-      mkdirSync(path.join(home, ".gemini", "antigravity-cli"), { recursive: true });
-      writeFileSync(path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "");
-      expect(hasAuthToken(home)).toBe(true);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
   });
 });
 

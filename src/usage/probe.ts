@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
 import path from "node:path";
 import { sanitizeInheritedChildProcessEnv } from "@get-bb/plugin-sdk/provider-bridge";
 import {
@@ -6,7 +6,6 @@ import {
   experimental_spawnHostProcess,
 } from "@get-bb/plugin-sdk/process";
 import { parseUsageJson, type ParseFailure } from "./print-reader.ts";
-import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import type { Command } from "../pool/account.ts";
 import type { ProbeFailure, ProbeOutcome } from "./types.ts";
 import { toQuotaWindows } from "./windows.ts";
@@ -55,10 +54,6 @@ export function resolveAgyBinary(
     if (file !== null && isExecutable(file)) return file;
   }
   return null;
-}
-
-export function hasAuthToken(homeDir: string): boolean {
-  return existsSync(path.join(homeDir, AGY_STATE_DIR, AGY_TOKEN_FILE));
 }
 
 export function createPrintRunner({
