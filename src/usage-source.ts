@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { ANTIGRAVITY } from "./identity.ts";
+import { isAntigravity } from "./identity.ts";
 import { DEFAULT_ACCOUNT } from "./pool/account.ts";
 import { listAccountsMethod, poolHostContract, readAccountUsageMethod } from "./pool-host-contract.ts";
 import {
@@ -15,10 +15,6 @@ const CACHE_TTL_MS = 60_000;
 const UNKNOWN_ACCOUNT = { accountEmail: null, planLabel: null };
 const HOST_CALL_TIMEOUT_MS = 40_000;
 const locatorSchema = z.tuple([z.string().min(1), z.string().min(1), z.string().min(1)]);
-
-function isAntigravity(provider: { id: string; pluginId?: string | null }): boolean {
-  return provider.pluginId === ANTIGRAVITY.pluginId && provider.id === ANTIGRAVITY.providerId;
-}
 
 export function registerUsageSource(bb: BbPluginApi) {
   const poolHost = bb.hosts.experimental_client({ contract: poolHostContract });

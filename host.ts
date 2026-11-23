@@ -4,7 +4,8 @@ import { experimental_registerAcpDialect } from "@get-bb/plugin-sdk/provider-bri
 import { ANTIGRAVITY } from "./src/identity.ts";
 import { listAccounts, poolPaths } from "./src/pool/account.ts";
 import { probeAccount } from "./src/pool/probe-account.ts";
-import { listAccountsMethod, poolHostContract, readAccountUsageMethod } from "./src/pool-host-contract.ts";
+import { listAccountsMethod, poolHostContract, readAccountUsageMethod, readPoolMethod } from "./src/pool-host-contract.ts";
+import { readPoolSnapshot } from "./src/pool/snapshot.ts";
 import { accountUsage } from "./src/usage/account-usage.ts";
 import { antigravityMaintenance } from "./src/usage/dialect.ts";
 import { resolveAgyBinary } from "./src/usage/probe.ts";
@@ -30,6 +31,8 @@ export default experimental_defineHostEntry({
       if (!account) return { found: false as const };
       return { found: true as const, usage: accountUsage(account, await probeAccount(paths(), account, locateBinary)) };
     },
+    [readPoolMethod]: () =>
+      readPoolSnapshot({ paths: paths(), probe: (account) => probeAccount(paths(), account, locateBinary) }),
   },
 });
 
