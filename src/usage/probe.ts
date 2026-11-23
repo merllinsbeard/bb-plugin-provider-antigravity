@@ -59,7 +59,7 @@ export function resolveAgyBinary(
 export function createPrintRunner({
   killAfterMs = KILL_AFTER_MS,
   maxStdoutBytes = MAX_STDOUT_BYTES,
-  command = (binary, args) => ({ command: binary, args }),
+  command = (binary, args) => ({ command: binary, args, env: {} }),
 }: {
   killAfterMs?: number;
   maxStdoutBytes?: number;
@@ -104,10 +104,10 @@ export function createPrintRunner({
     });
 }
 
-function spawnUsage({ command, args }: Command) {
+function spawnUsage({ command, args, env }: Command) {
   return experimental_spawnHostProcess(command, [...args], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: sanitizeInheritedChildProcessEnv({ env: process.env }),
+    env: { ...sanitizeInheritedChildProcessEnv({ env: process.env }), ...env },
   });
 }
 

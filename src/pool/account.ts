@@ -1,13 +1,18 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
+import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
 
 export const DEFAULT_ACCOUNT = "default" as AccountName;
 
 declare const accountNameBrand: unique symbol;
 export type AccountName = string & { readonly [accountNameBrand]: true };
 
-export type Account = { readonly name: AccountName; readonly dir: string };
+export type UsableAccount = { readonly name: AccountName; readonly dir: string; readonly egress: Route };
+
+export type BrokenAccount = { readonly name: AccountName; readonly dir: string; readonly egress: Unusable };
+
+export type Account = UsableAccount | BrokenAccount;
 
 export type PoolPaths = {
   readonly agyStateDir: string;
@@ -15,7 +20,11 @@ export type PoolPaths = {
   readonly bindingsFile: string;
 };
 
-export type Command = { readonly command: string; readonly args: readonly string[] };
+export type Command = {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+};
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 
@@ -46,20 +55,31 @@ export function listAccounts(paths: PoolPaths): Account[] {
         .flatMap((entry) => {
           const name = parseAccountName(entry);
           const dir = path.join(paths.accountsRoot, entry);
-          return name !== null && name !== DEFAULT_ACCOUNT && isDirectory(dir) ? [{ name, dir }] : [];
+          return name !== null && name !== DEFAULT_ACCOUNT && isDirectory(dir) ? [account(name, dir)] : [];
         })
     : [];
-  return [{ name: DEFAULT_ACCOUNT, dir: paths.agyStateDir }, ...added];
+  return [account(DEFAULT_ACCOUNT, paths.agyStateDir), ...added];
+}
+
+export function account(name: AccountName, dir: string): Account {
+  const egress = readEgress(dir);
+  return egress.kind === "invalid" ? { name, dir, egress } : { name, dir, egress };
+}
+
+export function isUsable(account: Account): account is UsableAccount {
+  return account.egress.kind !== "invalid";
 }
 
 export function isAuthenticated(account: Account): boolean {
   return existsSync(path.join(account.dir, AGY_TOKEN_FILE));
 }
 
-export function accountCommand(paths: PoolPaths, account: Account, agy: string, args: readonly string[]): Command {
-  if (account.name === DEFAULT_ACCOUNT) return { command: agy, args };
+export function accountCommand(paths: PoolPaths, account: UsableAccount, agy: string, args: readonly string[]): Command {
+  const env = routeEnv(account.egress);
+  if (account.name === DEFAULT_ACCOUNT) return { command: agy, args, env };
   return {
     command: "bwrap",
     args: ["--dev-bind", "/", "/", "--bind", account.dir, paths.agyStateDir, agy, ...args],
+    env,
   };
 }

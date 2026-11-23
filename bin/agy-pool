@@ -2,12 +2,23 @@
 set -euo pipefail
 cli="$(dirname "$(readlink -f "$0")")/../src/pool/cli.ts"
 
+launch() {
+  local -a lines
+  mapfile -t lines <<<"$1"
+  shift
+  local i=0
+  while [[ ${lines[i]} != -- ]]; do
+    export "${lines[i]}"
+    i=$((i + 1))
+  done
+  exec "${lines[@]:i+1}" "$@"
+}
+
 case "${1:-}" in
   list) exec node "$cli" list ;;
   login)
-    prefix=$(node "$cli" prepare-login "${2:-}")
-    mapfile -t cmd <<<"$prefix"
-    exec "${cmd[@]}" acp --login
+    prefix=$(node "$cli" prepare-login "${@:2}")
+    launch "$prefix" acp --login
     ;;
 esac
 
@@ -17,5 +28,4 @@ exec 9>>"$state/bindings.lock"
 flock 9
 prefix=$(node "$cli" resolve "$$")
 exec 9>&-
-mapfile -t cmd <<<"$prefix"
-exec "${cmd[@]}" "$@"
+launch "$prefix" "$@"

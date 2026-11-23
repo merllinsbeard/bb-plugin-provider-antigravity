@@ -4,11 +4,14 @@ import path from "node:path";
 import { resolveAgyBinary } from "../usage/probe.ts";
 import {
   DEFAULT_ACCOUNT,
+  account as readAccount,
   accountCommand,
   isAuthenticated,
+  isUsable,
   listAccounts,
   parseAccountName,
   poolPaths,
+  type Account,
   type Command,
 } from "./account.ts";
 import { liveThreadCounts, readBindings } from "./bindings.ts";
@@ -28,8 +31,9 @@ function requireAgy(): string {
   return locateBinary() ?? fail("agy-pool: agy is not installed (set BB_ANTIGRAVITY_EXECUTABLE or put agy on PATH).");
 }
 
-function printPrefix({ command, args }: Command): void {
-  process.stdout.write([command, ...args].join("\n"));
+function printPrefix({ command, args, env }: Command): void {
+  const exports = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+  process.stdout.write([...exports, "--", command, ...args].join("\n"));
 }
 
 async function resolve(pidArg: string | undefined): Promise<void> {
@@ -57,17 +61,27 @@ async function resolve(pidArg: string | undefined): Promise<void> {
 function prepareLogin(raw: string | undefined): void {
   const name = parseAccountName(raw ?? "") ?? fail("agy-pool: usage `agy-pool login <name>`; a name is 1-16 of a-z, 0-9, _ and -.");
   const agy = requireAgy();
-  const account = listAccounts(paths).find((candidate) => candidate.name === name) ?? {
-    name,
-    dir: path.join(paths.accountsRoot, name),
-  };
-  if (account.name !== DEFAULT_ACCOUNT) {
-    mkdirSync(account.dir, { recursive: true, mode: 0o700 });
+  const dir = name === DEFAULT_ACCOUNT ? paths.agyStateDir : path.join(paths.accountsRoot, name);
+  if (name !== DEFAULT_ACCOUNT) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const settings = path.join(paths.agyStateDir, "settings.json");
-    const copy = path.join(account.dir, "settings.json");
+    const copy = path.join(dir, "settings.json");
     if (existsSync(settings) && !existsSync(copy)) copyFileSync(settings, copy);
   }
+  const account = readAccount(name, dir);
+  if (!isUsable(account)) fail(`agy-pool: account "${name}" is unusable: ${account.egress.problem}`);
   printPrefix(accountCommand(paths, account, agy, []));
+}
+
+function describeEgress(account: Account): string {
+  switch (account.egress.kind) {
+    case "direct":
+      return "direct";
+    case "proxy":
+      return `proxy ${account.egress.endpoint}`;
+    case "invalid":
+      return "unusable";
+  }
 }
 
 async function list(): Promise<void> {
@@ -79,6 +93,7 @@ async function list(): Promise<void> {
     accounts.push({
       name: account.name,
       dir: account.dir,
+      egress: describeEgress(account),
       authenticated: isAuthenticated(account),
       boundThreads: [...bindings.values()].filter((binding) => binding.account === account.name).length,
       liveThreads: live.get(account.name) ?? 0,

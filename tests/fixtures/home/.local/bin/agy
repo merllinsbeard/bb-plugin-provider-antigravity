@@ -1,13 +1,16 @@
 #!/bin/sh
 here=$(dirname "$0")
 state="$HOME/.gemini/antigravity-cli"
-[ -n "$AGY_FAKE_LOG" ] && printf '%s|marker=%s\n' "$*" "$BB_PROBE_MARKER" >> "$AGY_FAKE_LOG"
+name=$(cat "$state/fake-name" 2>/dev/null || echo default)
+egress=""
+[ -n "${HTTPS_PROXY:-}${HTTP_PROXY:-}" ] && egress="|account=$name|https_proxy=$HTTPS_PROXY|http_proxy=$HTTP_PROXY|no_proxy=$NO_PROXY"
+[ -n "$AGY_FAKE_LOG" ] && printf '%s|marker=%s%s\n' "$*" "$BB_PROBE_MARKER" "$egress" >> "$AGY_FAKE_LOG"
 if [ "$1" = "--version" ]; then
   echo "1.5.15"
   exit 0
 fi
 if [ "$1" = "acp" ]; then
-  printf 'account=%s pid=%s args=%s\n' "$(cat "$state/fake-name" 2>/dev/null || echo default)" "$$" "$*"
+  printf 'account=%s pid=%s args=%s%s\n' "$name" "$$" "$*" "$egress"
   if [ "$AGY_FAKE_MODE" = "serve" ]; then
     trap 'echo "term $(cat "$state/fake-name" 2>/dev/null || echo default)" >> "$AGY_FAKE_LOG"; exit 0' TERM
     while :; do sleep 0.1; done

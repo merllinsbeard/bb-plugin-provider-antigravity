@@ -115,8 +115,9 @@ describe("agy-pool launcher", () => {
   const accountDir = (account: string) => path.join(home, ".local", "share", "agy-accounts", account);
   const bindings = () => JSON.parse(readFileSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"), "utf8"));
 
-  function account(dir: string, opts: { usage?: Fractions; signedIn?: boolean; label?: string }) {
+  function account(dir: string, opts: { usage?: Fractions; signedIn?: boolean; label?: string; proxy?: string }) {
     mkdirSync(dir, { recursive: true });
+    if (opts.proxy !== undefined) writeFileSync(path.join(dir, "agy-pool-proxy"), `${opts.proxy}\n`, { mode: 0o600 });
     if (opts.signedIn ?? true) writeFileSync(path.join(dir, "antigravity-oauth-token"), "");
     if (opts.usage) writeFileSync(path.join(dir, "fake-usage.json"), usageJson(opts.usage));
     if (opts.label) writeFileSync(path.join(dir, "fake-name"), opts.label);
@@ -251,5 +252,67 @@ describe("agy-pool launcher", () => {
     ]);
     expect(listed[1].quota.map((w: { label: string }) => w.label)).toContain("5h · Gemini");
     expect(listed[2].quota).toBeNull();
+  });
+  const PROXY = "http://pool-user:s3cret@127.0.0.1:3128";
+  const NO_PROXY = "localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net";
+  const proxied = (url: string) => `|account=alt|https_proxy=${url}|http_proxy=${url}|no_proxy=${NO_PROXY}`;
+  const usageCalls = () => readFileSync(log, "utf8").trim().split("\n").filter((line) => line.startsWith("-p /usage"));
+
+  it("probes and launches a proxied account through its proxy and leaves a direct account direct", async () => {
+    account(accountDir("alt"), { usage: { gemini5h: 0.9, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
+    const run = await launch({ BB_THREAD_ID: "thr_proxy" });
+    expect(run.code).toBe(0);
+    expect(run.stdout).toMatch(new RegExp(`^account=alt pid=\\d+ args=acp\\|account=alt\\|https_proxy=${PROXY}\\|`));
+    expect(run.stdout).toContain(proxied(PROXY));
+    expect(usageCalls().sort()).toEqual([
+      "-p /usage --output-format json --print-timeout 15s|marker=",
+      `-p /usage --output-format json --print-timeout 15s|marker=${proxied(PROXY)}`,
+    ]);
+  });
+
+  it("keeps the proxy URL out of the launched process's command line", async () => {
+    account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 1 } });
+    account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
+    const { child, line } = await serve("thr_argv");
+    expect(line).toContain(proxied(PROXY));
+    const argv = readFileSync(`/proc/${child.pid}/cmdline`, "utf8");
+    expect(argv).toContain("bwrap");
+    expect(argv).not.toContain("s3cret");
+  });
+
+  it("never picks or launches an account whose proxy file is malformed", async () => {
+    account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: "ftp://127.0.0.1:21" });
+    expect(accountOf((await launch({ BB_THREAD_ID: "thr_bad" })).stdout)).toBe("default");
+
+    const forced = await launch({ AGY_POOL_ACCOUNT: "alt" });
+    expect(forced.code).toBe(1);
+    expect(forced.stdout).toBe("");
+    expect(forced.stderr).toContain('account "alt" is unusable');
+    expect(usageCalls().some((line) => line.includes("account=alt"))).toBe(false);
+  });
+
+  it("refuses to start a thread bound to an account whose proxy file broke, instead of going direct", async () => {
+    account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
+    expect(accountOf((await launch({ BB_THREAD_ID: "thr_bound" })).stdout)).toBe("alt");
+    writeFileSync(path.join(accountDir("alt"), "agy-pool-proxy"), "not a url\n");
+    const run = await launch({ BB_THREAD_ID: "thr_bound" });
+    expect(run.code).toBe(1);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("agy-pool-proxy");
+  });
+
+  it("lists each account's egress without the proxy credentials", async () => {
+    account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
+    account(accountDir("bad"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "bad", proxy: "http://u:hidden@" });
+    const run = await launch({}, ["list"]);
+    expect(run.stdout).not.toContain("s3cret");
+    expect(run.stdout).not.toContain("hidden");
+    const listed = JSON.parse(run.stdout).accounts;
+    expect(listed.map((a: { name: string; egress: string }) => [a.name, a.egress])).toEqual([
+      ["default", "direct"],
+      ["alt", "proxy 127.0.0.1:3128"],
+      ["bad", "unusable"],
+    ]);
+    expect(listed[2].quotaStatus.message).toContain("agy-pool-proxy");
   });
 });

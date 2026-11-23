@@ -2,10 +2,12 @@ import type { ProviderQuota } from "../usage/types.ts";
 import {
   DEFAULT_ACCOUNT,
   isAuthenticated,
+  isUsable,
   listAccounts,
   parseAccountName,
   type Account,
   type PoolPaths,
+  type UsableAccount,
 } from "./account.ts";
 import { liveThreadCounts, readBindings, writeBindings } from "./bindings.ts";
 import { pickAccount } from "./pick.ts";
@@ -24,12 +26,18 @@ export type ResolvePorts = {
 };
 
 export type Resolution =
-  | { readonly ok: true; readonly account: Account }
+  | { readonly ok: true; readonly account: UsableAccount }
   | { readonly ok: false; readonly message: string };
 
-function byName(accounts: readonly Account[], raw: string): Account | undefined {
+function byName<A extends Account>(accounts: readonly A[], raw: string): A | undefined {
   const name = parseAccountName(raw);
   return accounts.find((account) => account.name === name);
+}
+
+function launchable(account: Account): Resolution {
+  return isUsable(account)
+    ? { ok: true, account }
+    : { ok: false, message: `agy-pool: account "${account.name}" is unusable: ${account.egress.problem}` };
 }
 
 export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest): Promise<Resolution> {
@@ -37,13 +45,14 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   if (request.threadId === null || request.requestedAccount !== null) {
     const name = request.requestedAccount ?? DEFAULT_ACCOUNT;
     const account = byName(accounts, name);
-    return account ? { ok: true, account } : { ok: false, message: `agy-pool: no account named "${name}".` };
+    if (!account) return { ok: false, message: `agy-pool: no account named "${name}".` };
+    return launchable(account);
   }
   const threadId = request.threadId;
   const bindings = readBindings(ports.paths.bindingsFile);
   const bound = bindings.get(threadId);
   const boundAt = (ports.now ?? (() => new Date()))().toISOString();
-  const record = (account: Account, since: string) => {
+  const record = (account: UsableAccount, since: string) => {
     const next = new Map(bindings);
     next.set(threadId, { account: account.name, pid: request.pid, boundAt: since });
     writeBindings(ports.paths.bindingsFile, next);
@@ -51,11 +60,12 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   };
   if (bound) {
     const account = byName(accounts, bound.account);
-    return account
-      ? record(account, bound.boundAt)
-      : { ok: false, message: `agy-pool: thread ${threadId} is bound to account "${bound.account}", which no longer exists.` };
+    if (!account)
+      return { ok: false, message: `agy-pool: thread ${threadId} is bound to account "${bound.account}", which no longer exists.` };
+    const resolved = launchable(account);
+    return resolved.ok ? record(resolved.account, bound.boundAt) : resolved;
   }
-  const authenticated = accounts.filter(isAuthenticated);
+  const authenticated = accounts.filter(isUsable).filter(isAuthenticated);
   const live = liveThreadCounts(bindings, ports.isAlive);
   const candidates = await Promise.all(
     authenticated.map(async (account) => ({
@@ -65,9 +75,17 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
     })),
   );
   const pick = pickAccount(candidates);
-  if (pick.ok) return record(byName(accounts, pick.account)!, boundAt);
-  if (pick.reason === "no-authenticated-account")
-    return { ok: false, message: "agy-pool: no signed-in Antigravity account. Run `agy-pool login <name>` or `agy acp --login`." };
+  if (pick.ok) return record(byName(authenticated, pick.account)!, boundAt);
+  if (pick.reason === "no-authenticated-account") {
+    const broken = accounts.flatMap((account) => (account.egress.kind === "invalid" ? [account.egress.problem] : []));
+    return {
+      ok: false,
+      message: [
+        "agy-pool: no signed-in Antigravity account. Run `agy-pool login <name>` or `agy acp --login`.",
+        ...broken.map((problem) => `Skipped: ${problem}`),
+      ].join("\n"),
+    };
+  }
   const reset = pick.nearestReset;
   return {
     ok: false,
