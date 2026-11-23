@@ -13,14 +13,11 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "types": [
-      "node",
-      "react"
-    ],
-    "jsx": "react-jsx"
+      "node"
+    ]
   },
   "include": [
     "*.ts",
-    "*.tsx",
     "src/**/*.ts",
     "tests/**/*.ts",
     "scripts/**/*.ts"

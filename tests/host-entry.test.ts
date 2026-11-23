@@ -4,13 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
-import { listAccountsMethod, readAccountUsageMethod, readPoolMethod } from "../src/pool-host-contract.ts";
+import { listAccountsMethod, readAccountUsageMethod } from "../src/pool-host-contract.ts";
 
 const fakeAgy = fileURLToPath(new URL("./fixtures/home/.local/bin/agy", import.meta.url));
 
 let home: string;
 let log: string;
-let call: <M extends typeof listAccountsMethod | typeof readAccountUsageMethod | typeof readPoolMethod>(
+let call: <M extends typeof listAccountsMethod | typeof readAccountUsageMethod>(
   method: M,
   input: M extends typeof readAccountUsageMethod ? { account: string } : Record<string, never>,
 ) => Promise<any>;
@@ -106,24 +106,5 @@ describe("pool host entry", () => {
   it("reports an account that is no longer in the pool as not found", async () => {
     addAccount("default", { email: "me@example.com" });
     expect(await call(readAccountUsageMethod, { account: "gone" })).toEqual({ found: false });
-  });
-
-  it("summarises the whole pool for the panel and names the account the next thread takes", async () => {
-    addAccount("default", { email: "me@example.com" });
-    addAccount("acc2", { email: "two@example.com", proxy: "http://user:pw@127.0.0.1:9", gemini5hRemaining: 0.9 });
-    addAccount("acc3");
-    const pool = await call(readPoolMethod, {});
-    expect(pool.next).toBe("acc2");
-    expect(pool.accounts.map((account: { name: string }) => account.name)).toEqual(["default", "acc2", "acc3"]);
-    const acc2 = pool.accounts[1];
-    expect(acc2).toMatchObject({ email: "two@example.com", route: { kind: "proxy", endpoint: "127.0.0.1:9" }, liveThreads: 0 });
-    expect(JSON.stringify(pool)).not.toContain("user:pw");
-    expect(acc2.quota.status).toBe("ok");
-    expect(acc2.quota.groups[0]).toEqual({
-      name: "Gemini",
-      fiveHour: { usedPercent: 10, resetsAt: "2026-11-23T11:13:01.000Z" },
-      weekly: { usedPercent: 39.9, resetsAt: "2026-11-28T15:54:51.000Z" },
-    });
-    expect(pool.accounts[2]).toMatchObject({ email: null, route: { kind: "direct" }, quota: { status: "signed-out" } });
   });
 });

@@ -10,7 +10,7 @@ function clean(text: string): string {
   return text.trim().replace(/\s+/g, " ");
 }
 
-export function groupLabel(name: string): string {
+function groupLabel(name: string): string {
   return clean(name)
     .replace(/\s+models?$/i, "")
     .replace(/\s+and\s+/i, "/")
