@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
@@ -72,6 +72,16 @@ export function isUsable(account: Account): account is UsableAccount {
 
 export function isAuthenticated(account: Account): boolean {
   return existsSync(path.join(account.dir, AGY_TOKEN_FILE));
+}
+
+export function readAccountEmail(account: Account): string | null {
+  try {
+    const token: unknown = JSON.parse(readFileSync(path.join(account.dir, AGY_TOKEN_FILE), "utf8"));
+    const email = (token as { id_token_email?: unknown } | null)?.id_token_email;
+    return typeof email === "string" && email.trim() !== "" ? email.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 export function accountCommand(paths: PoolPaths, account: UsableAccount, agy: string, args: readonly string[]): Command {

@@ -39,7 +39,7 @@ const usageWindowSchema = z.object({
     })
     .nullable(),
 });
-const usageSchema = z.discriminatedUnion("status", [
+export const usageSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
     ...accountFields,
