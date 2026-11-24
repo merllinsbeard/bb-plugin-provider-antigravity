@@ -2,6 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { isAntigravity } from "./identity.ts";
 import { DEFAULT_ACCOUNT } from "./pool/account.ts";
+import { poolWeeklyTotal } from "./usage/pool-total.ts";
 import { listAccountsMethod, poolHostContract, readAccountUsageMethod } from "./pool-host-contract.ts";
 import {
   usageFetchMethod,
@@ -14,7 +15,11 @@ import {
 const CACHE_TTL_MS = 60_000;
 const UNKNOWN_ACCOUNT = { accountEmail: null, planLabel: null };
 const HOST_CALL_TIMEOUT_MS = 40_000;
-const locatorSchema = z.tuple([z.string().min(1), z.string().min(1), z.string().min(1)]);
+/** [host, provider, account] names one account; [host, provider] names the pool's weekly total. */
+const locatorSchema = z.union([
+  z.tuple([z.string().min(1), z.string().min(1), z.string().min(1)]),
+  z.tuple([z.string().min(1), z.string().min(1)]),
+]);
 
 export function registerUsageSource(bb: BbPluginApi) {
   const poolHost = bb.hosts.experimental_client({ contract: poolHostContract });
@@ -22,8 +27,25 @@ export function registerUsageSource(bb: BbPluginApi) {
   const cache = new Map<string, UsageMeasurement>();
   const pending = new Map<string, { refresh: boolean; promise: Promise<UsageMeasurement> }>();
 
+  const loadTotal = async (hostId: string, providerId: string, refresh: boolean): Promise<UsageMeasurement> => {
+    const machine = (await bb.sdk.hosts.list()).find((candidate) => candidate.id === hostId);
+    if (!machine) throw new Error("Usage resource no longer exists.");
+    const accounts = await poolAccounts(machine);
+    const measurements = await Promise.all(
+      accounts.map((account) => collect(JSON.stringify([hostId, providerId, account]), refresh)),
+    );
+    const observed = measurements.flatMap((m) => (m.usage.status === "ok" && m.observedAt !== null ? [m.observedAt] : []));
+    return usageMeasurementSchema.parse({
+      accountKey: null,
+      observedAt: observed.length > 0 ? Math.min(...observed) : null,
+      usage: poolWeeklyTotal(measurements.map((m) => m.usage)),
+    });
+  };
+
   const load = async (resourceId: string, refresh: boolean): Promise<UsageMeasurement> => {
-    const [hostId, providerId, account] = locatorSchema.parse(JSON.parse(resourceId));
+    const locator = locatorSchema.parse(JSON.parse(resourceId));
+    if (locator.length === 2) return loadTotal(locator[0], locator[1], refresh);
+    const [hostId, providerId, account] = locator;
     const machine = (await bb.sdk.hosts.list()).find((candidate) => candidate.id === hostId);
     if (!machine) throw new Error("Usage resource no longer exists.");
     const previous = cache.get(resourceId);
@@ -96,15 +118,27 @@ export function registerUsageSource(bb: BbPluginApi) {
               );
               if (providers.length === 0) return [];
               const accounts = await poolAccounts(machine);
-              return providers.flatMap((provider) =>
-                accounts.map((account) => ({
+              const scope = { kind: "host" as const, hostId: machine.id, hostName: machine.name };
+              return providers.flatMap((provider) => [
+                ...(accounts.length > 1
+                  ? [
+                      {
+                        id: JSON.stringify([machine.id, provider.id]),
+                        accountKey: null,
+                        providerId: provider.id,
+                        label: `${provider.displayName} · all accounts`,
+                        scope,
+                      },
+                    ]
+                  : []),
+                ...accounts.map((account) => ({
                   id: JSON.stringify([machine.id, provider.id, account]),
                   accountKey: null,
                   providerId: provider.id,
                   label: `${provider.displayName} · ${account}`,
-                  scope: { kind: "host" as const, hostId: machine.id, hostName: machine.name },
+                  scope,
                 })),
-              );
+              ]);
             }),
           )
         ).flat();

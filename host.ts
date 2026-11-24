@@ -1,6 +1,7 @@
 import os from "node:os";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { experimental_registerAcpDialect } from "@get-bb/plugin-sdk/provider-bridge/acp";
+import { presentDefaultModel } from "./src/default-model.ts";
 import { ANTIGRAVITY } from "./src/identity.ts";
 import { listAccounts, poolPaths } from "./src/pool/account.ts";
 import { probeAccount } from "./src/pool/probe-account.ts";
@@ -14,6 +15,7 @@ const paths = () => poolPaths(process.env, os.homedir());
 
 experimental_registerAcpDialect({
   id: ANTIGRAVITY.dialectId,
+  presentModel: presentDefaultModel,
   maintenance: antigravityMaintenance({
     locateBinary,
     accounts: () => listAccounts(paths()),
