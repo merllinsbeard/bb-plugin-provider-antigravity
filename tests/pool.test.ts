@@ -62,15 +62,38 @@ function quota(f: Fractions): ProviderQuota {
 const name = (raw: string) => raw as AccountName;
 
 describe("pickAccount", () => {
-  it("picks the account with more remaining quota across model groups", () => {
+  it("prioritizes weekly quota over untouched 5h windows", () => {
     const pick = pickAccount([
-      { name: name("default"), quota: quota({ gemini5h: 0.3, geminiWeekly: 0.9 }), liveThreads: 0 },
-      { name: name("alt"), quota: quota({ gemini5h: 0.9, geminiWeekly: 0.1, other5h: 0.5, otherWeekly: 0.6 }), liveThreads: 3 },
+      { name: name("default"), quota: quota({ gemini5h: 0.2, geminiWeekly: 0.9 }), liveThreads: 0 },
+      { name: name("alt"), quota: quota({ gemini5h: 1, geminiWeekly: 0.5 }), liveThreads: 0 },
     ]);
-    expect(pick).toEqual({ ok: true, account: "alt" });
+    expect(pick).toEqual({ ok: true, account: "default" });
   });
 
-  it("balances Gemini usage even when Claude/GPT is untouched on every account", () => {
+  it("drains an account with an already-active 5h window instead of spreading evenly across untouched accounts", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: quota({ gemini5h: 0.75, geminiWeekly: 0.95 }), liveThreads: 1 },
+        { name: name("acc2"), quota: quota({ gemini5h: 1, geminiWeekly: 1 }), liveThreads: 0 },
+        { name: name("acc3"), quota: quota({ gemini5h: 1, geminiWeekly: 1 }), liveThreads: 0 },
+      ],
+      "gemini",
+    );
+    expect(pick).toEqual({ ok: true, account: "default" });
+  });
+
+  it("finishes the more-drained active 5h window first when two active accounts are close on weekly", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: quota({ gemini5h: 0.3, geminiWeekly: 0.92 }), liveThreads: 0 },
+        { name: name("acc2"), quota: quota({ gemini5h: 0.7, geminiWeekly: 0.95 }), liveThreads: 0 },
+      ],
+      "gemini",
+    );
+    expect(pick).toEqual({ ok: true, account: "default" });
+  });
+
+  it("switches to a fuller weekly account once the active account falls more than 20% behind on weekly", () => {
     const pick = pickAccount([
       { name: name("default"), quota: quota({ gemini5h: 0.48, geminiWeekly: 0.38, other5h: 1, otherWeekly: 1 }), liveThreads: 0 },
       { name: name("alt"), quota: quota({ gemini5h: 1, geminiWeekly: 1, other5h: 1, otherWeekly: 1 }), liveThreads: 0 },
@@ -141,7 +164,7 @@ describe("pickAccount for a known model family", () => {
       ],
       "gemini",
     );
-    expect(pick).toEqual({ ok: true, account: "default" });
+    expect(pick).toEqual({ ok: true, account: "acc3" });
   });
 
   it("refuses Claude/GPT with that family's reset when only Gemini has room", () => {
@@ -215,7 +238,7 @@ describe("agy-pool launcher", () => {
     home = path.join(root, "home");
     log = path.join(root, "calls.log");
     children = [];
-    account(stateDir(), { usage: { gemini5h: 0.2, geminiWeekly: 1 } });
+    account(stateDir(), { usage: { gemini5h: 0.2, geminiWeekly: 0.2 } });
   });
 
   afterEach(() => {
@@ -283,7 +306,7 @@ describe("agy-pool launcher", () => {
   });
 
   it("lets agy inside the bind shut down on the SIGTERM sequence BB sends", async () => {
-    account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 1 } });
+    account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 0.2 } });
     account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
     const { child, line } = await serve("thr_term");
     expect(accountOf(line)).toBe("alt");
@@ -329,7 +352,7 @@ describe("agy-pool launcher", () => {
   });
 
   it("keeps the proxy URL out of the launched process's command line", async () => {
-    account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 1 } });
+    account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 0.2 } });
     account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
     const { child, line } = await serve("thr_argv");
     expect(line).toContain(proxied(PROXY));

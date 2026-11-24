@@ -17,7 +17,7 @@ import { QUOTA_MESSAGE, exhaustedUntil, isQuotaError, markExhausted, quotaResetM
 const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
 const fakeBin = fileURLToPath(new URL("./fixtures/fake-acp-agy", import.meta.url));
 
-function usageJson(gemini5h: number, geminiWeekly = 1): string {
+function usageJson(gemini5h: number, geminiWeekly = gemini5h): string {
   const bucket = (id: string, window: string, remaining_fraction: number) => ({
     id,
     name: window,
