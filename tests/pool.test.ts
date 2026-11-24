@@ -115,6 +115,38 @@ describe("pickAccount", () => {
   });
 });
 
+describe("pickAccount for a known model family", () => {
+  // The 24.11 live state: Claude/GPT 5h spent everywhere, Gemini 5h at 15-18% left.
+  const spent3p = (gemini5h: number) => quota({ gemini5h, geminiWeekly: 0.78, other5h: 0, otherWeekly: 0.5 });
+
+  it("starts a Gemini session on an account whose Claude/GPT window is spent", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: spent3p(0.18), liveThreads: 0 },
+        { name: name("acc3"), quota: spent3p(0.15), liveThreads: 0 },
+      ],
+      "gemini",
+    );
+    expect(pick).toEqual({ ok: true, account: "default" });
+  });
+
+  it("refuses Claude/GPT with that family's reset when only Gemini has room", () => {
+    const pick = pickAccount([{ name: name("default"), quota: spent3p(0.18), liveThreads: 0 }], "3p");
+    expect(pick).toEqual({ ok: false, reason: "all-exhausted", nearestReset: { account: "default", at: new Date(RESET_5H).toISOString() } });
+  });
+
+  it("sends Claude/GPT to the account with Claude/GPT room even when another has more Gemini", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: spent3p(1), liveThreads: 0 },
+        { name: name("alt"), quota: quota({ gemini5h: 0.1, geminiWeekly: 0.5, other5h: 0.3, otherWeekly: 0.9 }), liveThreads: 4 },
+      ],
+      "3p",
+    );
+    expect(pick).toEqual({ ok: true, account: "alt" });
+  });
+});
+
 describe("agy-pool launcher", () => {
   let root: string;
   let home: string;
