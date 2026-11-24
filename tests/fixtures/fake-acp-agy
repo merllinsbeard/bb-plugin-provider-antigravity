@@ -23,19 +23,25 @@ const record = (entry) => {
   if (logFile) fs.appendFileSync(logFile, JSON.stringify({ account: name, ...entry }) + "\n");
 };
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+// Like agy, each session starts on Gemini 4 Neon until the client picks a model.
+const models = new Map();
+const modelOf = (sid) => models.get(sid) ?? "gemini-4-neon-high";
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
   record({ method: msg.method, params: msg.params });
-  if (msg.method === "initialize") {
+  if (msg.method === "initialize" && mode === "crash-on-init") {
+    process.exit(3);
+  } else if (msg.method === "initialize") {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
   } else if (msg.method === "session/new") {
     const sid = "sess-123";
     fs.mkdirSync(path.join(stateDir, "conversations"), { recursive: true });
     fs.writeFileSync(path.join(stateDir, "conversations", sid + ".db"), "history-from-" + name);
-    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
+    const noModel = fs.existsSync(path.join(stateDir, "fake-no-model"));
+    send({ jsonrpc: "2.0", id: msg.id, result: noModel ? { sessionId: sid } : { sessionId: sid, models: { currentModelId: modelOf(sid), availableModels: [] } } });
     if (mode === "large-commands") {
       const availableCommands = Array.from({ length: 400 }, (_, i) => ({
         name: i === 0 ? "goal" : `skill-${String(i).padStart(3, "0")}`,
@@ -61,11 +67,14 @@ rl.on("line", (line) => {
     });
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
   } else if (msg.method && msg.method.startsWith("session/set_")) {
+    if (msg.method === "session/set_model") models.set(msg.params.sessionId, msg.params.modelId);
+    if (msg.method === "session/set_config_option" && msg.params.configId === "model") models.set(msg.params.sessionId, msg.params.value);
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   } else if (msg.method === "session/prompt") {
     const sid = msg.params.sessionId;
     const promptText = msg.params.prompt?.[0]?.text ?? "";
-    if (mode === "quota") {
+    // "quota-3p" refuses Claude and GPT models only, as agy does when just that group's window is spent.
+    if (mode === "quota" || (mode === "quota-3p" && /^(claude|gpt)-/.test(modelOf(sid)))) {
       send({
         jsonrpc: "2.0",
         method: "session/update",

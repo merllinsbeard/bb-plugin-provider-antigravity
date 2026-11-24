@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { parseAccountName, type AccountName } from "./account.ts";
+import { parseModelFamily, type ModelFamily } from "./family.ts";
 
 // agy reports an exhausted account only inside the turn: one agent message
 // "\n⚠ Individual quota reached. ... Resets in 3h28m24s.\n" and a normal end_turn.
@@ -24,13 +25,18 @@ export function quotaResetMs(text: string): number {
   return ms > 0 ? ms : UNKNOWN_RESET_MS;
 }
 
-const fileSchema = z.object({ version: z.literal(1), accounts: z.record(z.string(), z.string()) });
+// Version 2 keys each mark by model family. Version 1 marked whole accounts,
+// which locked Gemini threads out when only Claude/GPT ran out, so its marks
+// are ignored.
+const fileSchema = z.object({ version: z.literal(2), accounts: z.record(z.string(), z.record(z.string(), z.string())) });
+
+export type Exhausted = ReadonlyMap<AccountName, ReadonlyMap<ModelFamily, string>>;
 
 export function exhaustionFile(bindingsFile: string): string {
   return path.join(path.dirname(bindingsFile), "exhausted.json");
 }
 
-function readAll(file: string): Record<string, string> {
+function readAll(file: string): Record<string, Record<string, string>> {
   try {
     const parsed = fileSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
     return parsed.success ? parsed.data.accounts : {};
@@ -39,20 +45,29 @@ function readAll(file: string): Record<string, string> {
   }
 }
 
-/** Accounts agy refused for quota, each with the time it is usable again; past marks are dropped. */
-export function readExhausted(file: string, now: Date): ReadonlyMap<AccountName, string> {
-  const marks = new Map<AccountName, string>();
-  for (const [raw, until] of Object.entries(readAll(file))) {
-    const name = parseAccountName(raw);
-    if (name !== null && Date.parse(until) > now.getTime()) marks.set(name, until);
+/** Account and model family pairs agy refused for quota, each with the time it is usable again; past marks are dropped. */
+export function readExhausted(file: string, now: Date): Exhausted {
+  const marks = new Map<AccountName, Map<ModelFamily, string>>();
+  for (const [rawAccount, families] of Object.entries(readAll(file))) {
+    const name = parseAccountName(rawAccount);
+    if (name === null) continue;
+    for (const [rawFamily, until] of Object.entries(families)) {
+      const family = parseModelFamily(rawFamily);
+      if (family !== null && Date.parse(until) > now.getTime()) marks.set(name, (marks.get(name) ?? new Map()).set(family, until));
+    }
   }
   return marks;
 }
 
-export function markExhausted(file: string, account: AccountName, until: Date): void {
-  const accounts = { ...readAll(file), [account]: until.toISOString() };
+export function exhaustedUntil(marks: Exhausted, account: AccountName, family: ModelFamily): string | undefined {
+  return marks.get(account)?.get(family);
+}
+
+export function markExhausted(file: string, account: AccountName, family: ModelFamily, until: Date): void {
+  const all = readAll(file);
+  const accounts = { ...all, [account]: { ...all[account], [family]: until.toISOString() } };
   mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ version: 1, accounts }, null, 2)}\n`);
+  writeFileSync(temp, `${JSON.stringify({ version: 2, accounts }, null, 2)}\n`);
   renameSync(temp, file);
 }

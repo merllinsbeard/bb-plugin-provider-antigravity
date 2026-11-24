@@ -20,6 +20,7 @@ import {
 import { PROXY_FILE, parseProxyUrl, type ProxyRoute } from "./egress.ts";
 import { liveThreadCounts, readBindings } from "./bindings.ts";
 import { exhaustionFile, markExhausted, readExhausted } from "./exhaustion.ts";
+import { parseModelFamily } from "./family.ts";
 import { resolveAccount } from "./launcher.ts";
 import { probeAccount } from "./probe-account.ts";
 
@@ -61,16 +62,21 @@ function checkProxy(name: string, route: ProxyRoute): void {
   process.stderr.write(`agy-pool: account "${name}" goes out through ${route.endpoint} as ${exit.query} (${exit.countryCode ?? "unknown country"}).\n`);
 }
 
-async function resolve(pidArg: string | undefined, exhaustArgs: readonly string[]): Promise<void> {
+/**
+ * `resolve <pid> [<refused accounts|-> <reset ms> [<family>]]`, the refused
+ * accounts comma-separated with the one that just refused first. The family
+ * comes last so relays started before it existed, which pass one refused
+ * account and the reset, still move off that account.
+ */
+async function resolve(pidArg: string | undefined, rest: readonly string[]): Promise<void> {
   const pid = Number(pidArg);
   if (!Number.isInteger(pid) || pid <= 0) fail("agy-pool: resolve needs the launcher pid.");
-  if (exhaustArgs.length > 0) {
-    const [rawAccount, rawMs] = exhaustArgs;
-    const exhaustedAccount = parseAccountName(rawAccount ?? "");
-    const resetMs = Number(rawMs);
-    if (exhaustedAccount !== null && Number.isFinite(resetMs) && resetMs > 0)
-      markExhausted(exhaustionFile(paths.bindingsFile), exhaustedAccount, new Date(Date.now() + resetMs));
-  }
+  const [rawAccount, rawMs, rawFamily] = rest;
+  const family = parseModelFamily(rawFamily ?? "");
+  const refused = (rawAccount ?? "").split(",").flatMap((raw) => parseAccountName(raw) ?? []);
+  const resetMs = Number(rawMs);
+  if (family !== null && refused[0] !== undefined && Number.isFinite(resetMs) && resetMs > 0)
+    markExhausted(exhaustionFile(paths.bindingsFile), refused[0], family, new Date(Date.now() + resetMs));
   const agy = requireAgy();
   const resolution = await resolveAccount(
     {
@@ -85,6 +91,8 @@ async function resolve(pidArg: string | undefined, exhaustArgs: readonly string[
       threadId: process.env.BB_THREAD_ID || null,
       requestedAccount: process.env.AGY_POOL_ACCOUNT || null,
       pid,
+      family,
+      refused,
     },
   );
   if (!resolution.ok) fail(resolution.message);

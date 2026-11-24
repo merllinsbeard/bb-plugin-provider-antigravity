@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,7 +12,7 @@ import {
   fitAvailableCommandsLine,
   providerCommandsPayloadBytes,
 } from "../src/pool/commands.ts";
-import { QUOTA_MESSAGE, isQuotaError, markExhausted, quotaResetMs, readExhausted } from "../src/pool/exhaustion.ts";
+import { QUOTA_MESSAGE, exhaustedUntil, isQuotaError, markExhausted, quotaResetMs, readExhausted } from "../src/pool/exhaustion.ts";
 
 const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
 const fakeBin = fileURLToPath(new URL("./fixtures/fake-acp-agy", import.meta.url));
@@ -60,11 +60,23 @@ describe("exhaustion helpers", () => {
     try {
       const file = path.join(dir, "exhausted.json");
       const now = new Date("2026-11-23T16:00:00Z");
-      markExhausted(file, parseAccountName("acc2")!, new Date("2026-11-23T15:00:00Z"));
-      markExhausted(file, parseAccountName("acc3")!, new Date("2026-11-23T19:00:00Z"));
+      markExhausted(file, parseAccountName("acc2")!, "3p", new Date("2026-11-23T15:00:00Z"));
+      markExhausted(file, parseAccountName("acc3")!, "3p", new Date("2026-11-23T19:00:00Z"));
       const active = readExhausted(file, now);
       expect(active.has("acc2" as AccountName)).toBe(false);
-      expect(active.get("acc3" as AccountName)).toBe("2026-11-23T19:00:00.000Z");
+      expect(exhaustedUntil(active, "acc3" as AccountName, "3p")).toBe("2026-11-23T19:00:00.000Z");
+      expect(exhaustedUntil(active, "acc3" as AccountName, "gemini")).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores version 1 marks, which closed whole accounts", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "agy-exhaust-"));
+    try {
+      const file = path.join(dir, "exhausted.json");
+      writeFileSync(file, JSON.stringify({ version: 1, accounts: { acc3: "2026-11-24T12:54:57.934Z" } }));
+      expect(readExhausted(file, new Date("2026-11-24T08:24:00Z")).size).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -196,7 +208,7 @@ describe("agy-pool ACP relay failover", () => {
     const bindings = JSON.parse(readFileSync(statePath("bindings.json"), "utf8"));
     expect(bindings.threads.thr_swap_1.account).toBe("default");
     const exhausted = JSON.parse(readFileSync(statePath("exhausted.json"), "utf8"));
-    expect(exhausted.accounts.alt).toBeTruthy();
+    expect(Object.keys(exhausted.accounts.alt)).toEqual(["gemini"]);
 
     const logEntries = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(logEntries.some((e) => e.account === "default" && e.method === "session/load" && e.params.sessionId === sid)).toBe(true);
@@ -275,6 +287,119 @@ describe("agy-pool ACP relay failover", () => {
       .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
       .map((m) => m.params.update.content.text);
     expect(chunks.join("")).toContain("Individual quota reached");
+  });
+
+  async function openSession(r: ReturnType<typeof startRelay>, model?: string): Promise<string> {
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    if (model !== undefined) {
+      r.send({ jsonrpc: "2.0", id: 3, method: "session/set_model", params: { sessionId: sid, modelId: model } });
+      await r.nextMatching((m) => m.id === 3);
+    }
+    return sid;
+  }
+
+  async function ask(r: ReturnType<typeof startRelay>, sid: string, text: string): Promise<string> {
+    r.send({ jsonrpc: "2.0", id: 4, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text }] } });
+    await r.nextMatching((m) => m.id === 4);
+    return r.messages
+      .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
+      .map((m) => m.params.update.content.text)
+      .join("");
+  }
+
+  it("keeps Gemini threads running when every account is out of Claude/GPT quota", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "quota-3p" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota-3p" });
+
+    const claude = startRelay("thr_claude");
+    expect(await ask(claude, await openSession(claude, "claude-opus-5-5-medium"), "Hi")).toContain("Individual quota reached");
+    const marks = JSON.parse(readFileSync(statePath("exhausted.json"), "utf8")).accounts;
+    expect(Object.keys(marks).sort()).toEqual(["alt", "default"]);
+    expect(Object.values(marks).map((families) => Object.keys(families as object))).toEqual([["3p"], ["3p"]]);
+
+    const gemini = startRelay("thr_gemini");
+    expect(await ask(gemini, await openSession(gemini), "Hi")).toBe("ANSWER(alt):Hi");
+  });
+
+  it("moves a prompt off an account already out of its family before sending it, and leaves other families there", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+    markExhausted(statePath("exhausted.json"), parseAccountName("alt")!, "3p", new Date(Date.now() + 3_600_000));
+
+    const claude = startRelay("thr_claude_pre");
+    expect(await ask(claude, await openSession(claude, "claude-sonnet-5-5-high"), "Go")).toBe("ANSWER(default):Go");
+    const log = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(log.some((e) => e.account === "alt" && e.method === "session/prompt")).toBe(false);
+    expect(JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads.thr_claude_pre.account).toBe("default");
+
+    const gemini = startRelay("thr_gemini_stays");
+    await openSession(gemini, "gemini-4-hydrogen-high");
+    expect(JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads.thr_gemini_stays.account).toBe("alt");
+  });
+
+  it("moves off a refusing account even when agy never named the session's model", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+    for (const dir of [stateDir(), accountDir("alt")]) writeFileSync(path.join(dir, "fake-no-model"), "");
+
+    const r = startRelay("thr_unknown_model");
+    expect(await ask(r, await openSession(r), "Hi")).toBe("ANSWER(default):Hi");
+    expect(existsSync(statePath("exhausted.json"))).toBe(false);
+  });
+
+  it("tries every other account before giving up when the model is unknown", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+    setupAccount(accountDir("acc3"), { label: "acc3", gemini5h: 0.8, acpMode: "quota" });
+    for (const dir of [stateDir(), accountDir("alt"), accountDir("acc3")]) writeFileSync(path.join(dir, "fake-no-model"), "");
+
+    const r = startRelay("thr_unknown_three");
+    expect(await ask(r, await openSession(r), "Hi")).toBe("ANSWER(default):Hi");
+  });
+
+  it("answers the prompt with an error and exits when the account it moves to dies", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "crash-on-init" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "ok" });
+    markExhausted(statePath("exhausted.json"), parseAccountName("alt")!, "3p", new Date(Date.now() + 3_600_000));
+
+    const r = startRelay("thr_dies_on_move");
+    const exited = new Promise<number | null>((resolve) => r.child.once("exit", resolve));
+    const sid = await openSession(r, "claude-opus-5-5-high");
+    r.send({ jsonrpc: "2.0", id: 4, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Go" }] } });
+    expect((await r.nextMatching((m) => m.id === 4)).error.message).toContain("agy exited");
+    expect(await exited).toBe(1);
+  });
+
+  it("follows a model chosen through session/set_config_option", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota-3p" });
+    markExhausted(statePath("exhausted.json"), parseAccountName("alt")!, "3p", new Date(Date.now() + 3_600_000));
+
+    const r = startRelay("thr_config_option");
+    const sid = await openSession(r);
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/set_config_option", params: { sessionId: sid, configId: "model", value: "claude-opus-5-5-high" } });
+    await r.nextMatching((m) => m.id === 3);
+    expect(await ask(r, sid, "Go")).toBe("ANSWER(default):Go");
+  });
+
+  it("still moves a thread off the refused account when a relay started before families calls resolve", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "ok" });
+    const first = startRelay("thr_old_relay");
+    await openSession(first);
+    expect(JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads.thr_old_relay.account).toBe("alt");
+
+    const cli = fileURLToPath(new URL("../src/pool/cli.ts", import.meta.url));
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("BB_") && !k.startsWith("AGY_")));
+    const run = spawnSync(process.execPath, [cli, "resolve", String(process.pid), "alt", "60000"], {
+      env: { ...base, HOME: home, BB_THREAD_ID: "thr_old_relay", BB_ANTIGRAVITY_EXECUTABLE: fakeBin },
+      encoding: "utf8",
+    });
+    expect(run.stdout).toContain("AGY_POOL_RESOLVED=default");
+    expect(existsSync(statePath("exhausted.json"))).toBe(false);
   });
 
   it("compacts oversized available_commands_update payloads below BB's 64 KiB limit while keeping every command", async () => {

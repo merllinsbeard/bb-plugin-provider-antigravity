@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccountName } from "../src/pool/account.ts";
+import { modelFamily } from "../src/pool/family.ts";
 import { pickAccount } from "../src/pool/pick.ts";
 import type { ProviderQuota } from "../src/usage/types.ts";
 
@@ -112,6 +113,51 @@ describe("pickAccount", () => {
       reason: "all-exhausted",
       nearestReset: { account: "alt", at: new Date(RESET_5H).toISOString() },
     });
+  });
+});
+
+describe("modelFamily", () => {
+  it("files each agy model under the quota group that meters it", () => {
+    expect(["gemini-4-neon-high", "gemini-4-hydrogen-low", "gemini-3.8-flash-medium", "gemini-pro-orchestrator-neon"].map(modelFamily)).toEqual([
+      "gemini",
+      "gemini",
+      "gemini",
+      "gemini",
+    ]);
+    expect(["claude-opus-5-5-medium", "claude-sonnet-5-5-high", "gpt-oss-120b-medium"].map(modelFamily)).toEqual(["3p", "3p", "3p"]);
+    expect(["gemini-4-argon-high", "gemini-pro-orchestrator-argon"].map(modelFamily)).toEqual(["argon", "argon"]);
+  });
+});
+
+describe("pickAccount for a known model family", () => {
+  // The 24.11 live state: Claude/GPT 5h spent everywhere, Gemini 5h at 15-18% left.
+  const spent3p = (gemini5h: number) => quota({ gemini5h, geminiWeekly: 0.78, other5h: 0, otherWeekly: 0.5 });
+
+  it("starts a Gemini session on an account whose Claude/GPT window is spent", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: spent3p(0.18), liveThreads: 0 },
+        { name: name("acc3"), quota: spent3p(0.15), liveThreads: 0 },
+      ],
+      "gemini",
+    );
+    expect(pick).toEqual({ ok: true, account: "default" });
+  });
+
+  it("refuses Claude/GPT with that family's reset when only Gemini has room", () => {
+    const pick = pickAccount([{ name: name("default"), quota: spent3p(0.18), liveThreads: 0 }], "3p");
+    expect(pick).toEqual({ ok: false, reason: "all-exhausted", nearestReset: { account: "default", at: new Date(RESET_5H).toISOString() } });
+  });
+
+  it("sends Claude/GPT to the account with Claude/GPT room even when another has more Gemini", () => {
+    const pick = pickAccount(
+      [
+        { name: name("default"), quota: spent3p(1), liveThreads: 0 },
+        { name: name("alt"), quota: quota({ gemini5h: 0.1, geminiWeekly: 0.5, other5h: 0.3, otherWeekly: 0.9 }), liveThreads: 4 },
+      ],
+      "3p",
+    );
+    expect(pick).toEqual({ ok: true, account: "alt" });
   });
 });
 

@@ -3,7 +3,10 @@
 // a prompt with its quota refusal, the relay hides that turn, marks the
 // account exhausted until the reset agy named, starts agy on another account,
 // reopens every session from the shared conversation store and sends the
-// prompt again, so bb sees one uninterrupted turn.
+// prompt again, so bb sees one uninterrupted turn. Quota is tracked per model
+// family: a refusal for Claude/GPT leaves the account open to Gemini, and a
+// prompt whose family is already known to be out on this account moves before
+// it is sent.
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
@@ -15,7 +18,8 @@ import { fileURLToPath } from "node:url";
 type RelayChild = ChildProcessByStdio<Writable, Readable, null>;
 import { parseAccountName, poolPaths, type AccountName } from "./account.ts";
 import { fitAvailableCommandsLine } from "./commands.ts";
-import { QUOTA_MESSAGE, isQuotaError, quotaResetMs } from "./exhaustion.ts";
+import { QUOTA_MESSAGE, exhaustedUntil, exhaustionFile, isQuotaError, quotaResetMs, readExhausted } from "./exhaustion.ts";
+import { modelFamily, type ModelFamily } from "./family.ts";
 
 type Message = {
   readonly id?: string | number | null;
@@ -40,12 +44,16 @@ type Refusal = {
 type Prompt = {
   readonly message: Message;
   readonly sessionId: string;
+  /** The model family the session used when the prompt was sent; null before agy named a model. */
+  readonly family: ModelFamily | null;
   /** agy already streamed output or tool calls for this turn. */
   produced: boolean;
   /** agy's quota refusal and every line after it, held back from bb. */
   refusal: Refusal | null;
   /** Number of account swaps already performed for this prompt. */
   swaps: number;
+  /** Accounts that refused this prompt, newest first, so a swap never returns to one of them. */
+  readonly refusedBy: readonly AccountName[];
 };
 
 const CONTINUE_PROMPT =
@@ -56,6 +64,7 @@ const MAX_SWAPS = 10;
 const paths = poolPaths(process.env, os.homedir());
 const cli = fileURLToPath(new URL("./cli.ts", import.meta.url));
 const lockFile = path.join(path.dirname(paths.bindingsFile), "bindings.lock");
+const marksFile = exhaustionFile(paths.bindingsFile);
 const passArgs = process.argv.slice(2);
 
 const idKey = (id: Message["id"]) => JSON.stringify(id ?? null);
@@ -69,11 +78,15 @@ function parse(line: string): Message | null {
   }
 }
 
-/** Runs the pool's account choice (and optional exhaustion mark) under bindings.lock; null when no account can start. */
-function resolveLaunch(exhaust?: { readonly account: AccountName; readonly resetMs: number }): Launch | null {
+/** Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock; null when no account can start. */
+function resolveLaunch(
+  family: ModelFamily | null,
+  exhaust?: { readonly accounts: readonly AccountName[]; readonly resetMs: number },
+): Launch | null {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
-  if (exhaust !== undefined) args.push(exhaust.account, String(Math.round(exhaust.resetMs)));
+  if (exhaust !== undefined || family !== null)
+    args.push(exhaust?.accounts.join(",") || "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -89,11 +102,14 @@ function resolveLaunch(exhaust?: { readonly account: AccountName; readonly reset
 
 function start(launch: Launch): RelayChild {
   // Own process group, so a swap can stop agy inside bwrap without touching the relay.
-  return spawn(launch.command, [...launch.args, ...passArgs], {
+  const child = spawn(launch.command, [...launch.args, ...passArgs], {
     env: { ...process.env, ...launch.env },
     stdio: ["pipe", "pipe", "inherit"],
     detached: true,
   });
+  // A write to an agy that already exited must not crash the relay; its exit handler reports the end.
+  child.stdin.on("error", () => {});
+  return child;
 }
 
 function stop(child: RelayChild, signal: NodeJS.Signals = "SIGTERM"): void {
@@ -110,6 +126,14 @@ function stop(child: RelayChild, signal: NodeJS.Signals = "SIGTERM"): void {
   }
 }
 
+/** The model agy reports for a session: the `model` config option, else the legacy `models` field. */
+function sessionModel(result: Record<string, unknown>): string | null {
+  const options = Array.isArray(result.configOptions) ? (result.configOptions as { id?: unknown; category?: unknown; currentValue?: unknown }[]) : [];
+  const option = options.find((candidate) => candidate.id === "model" || candidate.category === "model");
+  const current = option?.currentValue ?? (result.models as { currentModelId?: unknown } | undefined)?.currentModelId;
+  return typeof current === "string" ? current : null;
+}
+
 const out = (line: string): void => {
   process.stdout.write(`${line}\n`);
 };
@@ -120,6 +144,8 @@ class Relay {
   private initialize: Message | null = null;
   private readonly opening = new Map<string, Record<string, unknown>>();
   private readonly sessions = new Map<string, Record<string, unknown>>();
+  /** The model each session runs, from agy's session answers and bb's model choice. */
+  private readonly models = new Map<string, string>();
   private readonly settings = new Map<string, Map<string, Message>>();
   private readonly prompts = new Map<string, Prompt>();
   private readonly internal = new Map<string, (message: Message) => void>();
@@ -156,10 +182,15 @@ class Relay {
         }
         return;
       }
-      process.exitCode = code ?? (this.stopping ? 0 : signal ? 128 + (os.constants.signals[signal] ?? 0) : 1);
-      process.stdout.end();
-      setTimeout(() => process.exit(), 100).unref();
+      this.finish(code ?? (this.stopping ? 0 : signal ? 128 + (os.constants.signals[signal] ?? 0) : 1));
     });
+  }
+
+  /** Ends the relay with agy's exit code, so bb sees the agent stop. */
+  private finish(code: number): void {
+    process.exitCode = code;
+    process.stdout.end();
+    setTimeout(() => process.exit(), 100).unref();
   }
 
   private fromClient(line: string): void {
@@ -168,21 +199,48 @@ class Relay {
       return;
     }
     const message = parse(line);
-    if (message?.method !== undefined && message.id !== undefined) this.track(message);
+    if (message?.method !== undefined && message.id !== undefined) {
+      const prompt = this.track(message);
+      if (prompt && this.outOfQuota(prompt.family)) return void this.swap(prompt, null);
+    }
     this.child.stdin.write(`${line}\n`);
   }
 
-  private track(message: Message): void {
+  /** Another thread already found this account out of `family` quota. */
+  private outOfQuota(family: ModelFamily | null): boolean {
+    return (
+      family !== null && this.account !== null && exhaustedUntil(readExhausted(marksFile, new Date()), this.account, family) !== undefined
+    );
+  }
+
+  private track(message: Message): Prompt | null {
     const params = message.params ?? {};
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : null;
     if (message.method === "initialize") this.initialize = message;
     else if (message.method === "session/new") this.opening.set(idKey(message.id), params);
-    else if ((message.method === "session/load" || message.method === "session/resume") && sessionId) this.sessions.set(sessionId, params);
-    else if (message.method?.startsWith("session/set_") && sessionId) {
+    else if ((message.method === "session/load" || message.method === "session/resume") && sessionId) {
+      this.sessions.set(sessionId, params);
+      this.opening.set(idKey(message.id), params);
+    } else if (message.method?.startsWith("session/set_") && sessionId) {
       const key = `${message.method}:${String(params.configId ?? "")}`;
       this.settings.set(sessionId, (this.settings.get(sessionId) ?? new Map()).set(key, message));
-    } else if (message.method === "session/prompt" && sessionId)
-      this.prompts.set(idKey(message.id), { message, sessionId, produced: false, refusal: null, swaps: 0 });
+      const model = message.method === "session/set_model" ? params.modelId : params.configId === "model" ? params.value : undefined;
+      if (typeof model === "string") this.models.set(sessionId, model);
+    } else if (message.method === "session/prompt" && sessionId) {
+      const model = this.models.get(sessionId);
+      const prompt = {
+        message,
+        sessionId,
+        family: model === undefined ? null : modelFamily(model),
+        produced: false,
+        refusal: null,
+        swaps: 0,
+        refusedBy: [],
+      };
+      this.prompts.set(idKey(message.id), prompt);
+      return prompt;
+    }
+    return null;
   }
 
   private fromAgent(line: string): void {
@@ -198,8 +256,12 @@ class Relay {
       const opened = this.opening.get(key);
       if (opened) {
         this.opening.delete(key);
-        const sessionId = message.result?.sessionId;
-        if (typeof sessionId === "string") this.sessions.set(sessionId, opened);
+        const sessionId = message.result?.sessionId ?? opened.sessionId;
+        if (typeof sessionId === "string") {
+          this.sessions.set(sessionId, opened);
+          const current = sessionModel(message.result ?? {});
+          if (current !== null && !this.models.has(sessionId)) this.models.set(sessionId, current);
+        }
       }
       const prompt = this.prompts.get(key);
       if (prompt) {
@@ -246,19 +308,31 @@ class Relay {
     });
   }
 
-  private async swap(prompt: Prompt, response: string): Promise<void> {
+  /**
+   * Moves the session to another account and sends the prompt there. `response`
+   * is agy's answer to a refused prompt, or null when the prompt moves before
+   * it was sent because its family is already out on this account.
+   */
+  private async swap(prompt: Prompt, response: string | null): Promise<void> {
     const buffered: string[] = [];
     this.swapping = buffered;
     const giveUp = () => {
-      for (const line of [...prompt.refusal!.lines, response]) out(line);
+      const alive = this.child.exitCode === null && this.child.signalCode === null;
+      if (response !== null) for (const line of [...prompt.refusal!.lines, response]) out(line);
+      else if (alive) this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
+      else out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code: -32603, message: "agy exited during account swap" } }));
+      // The agy this swap started died; nothing is left to carry the session.
+      if (!alive) this.finish(1);
     };
     try {
       if (prompt.swaps >= MAX_SWAPS) return giveUp();
+      const refusedBy = this.account !== null && prompt.refusal !== null ? [this.account, ...prompt.refusedBy] : prompt.refusedBy;
       const exhaust =
-        this.account !== null ? { account: this.account, resetMs: quotaResetMs(prompt.refusal!.text) } : undefined;
-      const next = this.initialize === null ? null : resolveLaunch(exhaust);
+        refusedBy.length > 0 ? { accounts: refusedBy, resetMs: prompt.refusal === null ? 0 : quotaResetMs(prompt.refusal.text) } : undefined;
+      const next = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust);
       if (next === null || next.account === this.account) return giveUp();
-      process.stderr.write(`agy-pool: account "${this.account}" is out of quota; moving to "${next.account}".\n`);
+      const scope = prompt.family === null ? "quota" : `${prompt.family} quota`;
+      process.stderr.write(`agy-pool: account "${this.account}" is out of ${scope}; moving to "${next.account}".\n`);
       const previous = this.child;
       this.attach(next);
       stop(previous);
@@ -277,9 +351,11 @@ class Relay {
       this.prompts.set(idKey(message.id), {
         message,
         sessionId: prompt.sessionId,
+        family: prompt.family,
         produced: false,
         refusal: null,
         swaps: prompt.swaps + 1,
+        refusedBy,
       });
       this.child.stdin.write(`${JSON.stringify(message)}\n`);
     } finally {
@@ -289,7 +365,7 @@ class Relay {
   }
 }
 
-const launch = resolveLaunch();
+const launch = resolveLaunch(null);
 if (launch === null) process.exit(1);
 if (passArgs[0] === "acp") new Relay().run(launch);
 else {
