@@ -52,6 +52,8 @@ type Prompt = {
   refusal: Refusal | null;
   /** Number of account swaps already performed for this prompt. */
   swaps: number;
+  /** Accounts that refused this prompt, newest first, so a swap never returns to one of them. */
+  readonly refusedBy: readonly AccountName[];
 };
 
 const CONTINUE_PROMPT =
@@ -77,11 +79,14 @@ function parse(line: string): Message | null {
 }
 
 /** Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock; null when no account can start. */
-function resolveLaunch(family: ModelFamily | null, exhaust?: { readonly account: AccountName; readonly resetMs: number }): Launch | null {
+function resolveLaunch(
+  family: ModelFamily | null,
+  exhaust?: { readonly accounts: readonly AccountName[]; readonly resetMs: number },
+): Launch | null {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
   if (exhaust !== undefined || family !== null)
-    args.push(exhaust?.account ?? "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
+    args.push(exhaust?.accounts.join(",") || "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -177,10 +182,15 @@ class Relay {
         }
         return;
       }
-      process.exitCode = code ?? (this.stopping ? 0 : signal ? 128 + (os.constants.signals[signal] ?? 0) : 1);
-      process.stdout.end();
-      setTimeout(() => process.exit(), 100).unref();
+      this.finish(code ?? (this.stopping ? 0 : signal ? 128 + (os.constants.signals[signal] ?? 0) : 1));
     });
+  }
+
+  /** Ends the relay with agy's exit code, so bb sees the agent stop. */
+  private finish(code: number): void {
+    process.exitCode = code;
+    process.stdout.end();
+    setTimeout(() => process.exit(), 100).unref();
   }
 
   private fromClient(line: string): void {
@@ -218,7 +228,15 @@ class Relay {
       if (typeof model === "string") this.models.set(sessionId, model);
     } else if (message.method === "session/prompt" && sessionId) {
       const model = this.models.get(sessionId);
-      const prompt = { message, sessionId, family: model === undefined ? null : modelFamily(model), produced: false, refusal: null, swaps: 0 };
+      const prompt = {
+        message,
+        sessionId,
+        family: model === undefined ? null : modelFamily(model),
+        produced: false,
+        refusal: null,
+        swaps: 0,
+        refusedBy: [],
+      };
       this.prompts.set(idKey(message.id), prompt);
       return prompt;
     }
@@ -299,15 +317,18 @@ class Relay {
     const buffered: string[] = [];
     this.swapping = buffered;
     const giveUp = () => {
-      if (response === null) this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
-      else for (const line of [...prompt.refusal!.lines, response]) out(line);
+      const alive = this.child.exitCode === null && this.child.signalCode === null;
+      if (response !== null) for (const line of [...prompt.refusal!.lines, response]) out(line);
+      else if (alive) this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
+      else out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code: -32603, message: "agy exited during account swap" } }));
+      // The agy this swap started died; nothing is left to carry the session.
+      if (!alive) this.finish(1);
     };
     try {
       if (prompt.swaps >= MAX_SWAPS) return giveUp();
+      const refusedBy = this.account !== null && prompt.refusal !== null ? [this.account, ...prompt.refusedBy] : prompt.refusedBy;
       const exhaust =
-        this.account !== null && prompt.refusal !== null
-          ? { account: this.account, resetMs: quotaResetMs(prompt.refusal.text) }
-          : undefined;
+        refusedBy.length > 0 ? { accounts: refusedBy, resetMs: prompt.refusal === null ? 0 : quotaResetMs(prompt.refusal.text) } : undefined;
       const next = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust);
       if (next === null || next.account === this.account) return giveUp();
       const scope = prompt.family === null ? "quota" : `${prompt.family} quota`;
@@ -334,6 +355,7 @@ class Relay {
         produced: false,
         refusal: null,
         swaps: prompt.swaps + 1,
+        refusedBy,
       });
       this.child.stdin.write(`${JSON.stringify(message)}\n`);
     } finally {

@@ -350,6 +350,29 @@ describe("agy-pool ACP relay failover", () => {
     expect(existsSync(statePath("exhausted.json"))).toBe(false);
   });
 
+  it("tries every other account before giving up when the model is unknown", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+    setupAccount(accountDir("acc3"), { label: "acc3", gemini5h: 0.8, acpMode: "quota" });
+    for (const dir of [stateDir(), accountDir("alt"), accountDir("acc3")]) writeFileSync(path.join(dir, "fake-no-model"), "");
+
+    const r = startRelay("thr_unknown_three");
+    expect(await ask(r, await openSession(r), "Hi")).toBe("ANSWER(default):Hi");
+  });
+
+  it("answers the prompt with an error and exits when the account it moves to dies", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "crash-on-init" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "ok" });
+    markExhausted(statePath("exhausted.json"), parseAccountName("alt")!, "3p", new Date(Date.now() + 3_600_000));
+
+    const r = startRelay("thr_dies_on_move");
+    const exited = new Promise<number | null>((resolve) => r.child.once("exit", resolve));
+    const sid = await openSession(r, "claude-opus-5-5-high");
+    r.send({ jsonrpc: "2.0", id: 4, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Go" }] } });
+    expect((await r.nextMatching((m) => m.id === 4)).error.message).toContain("agy exited");
+    expect(await exited).toBe(1);
+  });
+
   it("follows a model chosen through session/set_config_option", async () => {
     setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
     setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota-3p" });

@@ -21,8 +21,8 @@ export type LaunchRequest = {
   readonly pid: number;
   /** The model family the thread needs, known once its session chose a model; null at first start. */
   readonly family: ModelFamily | null;
-  /** The account agy just refused for this thread; it is skipped even when the family is unknown. */
-  readonly refused: AccountName | null;
+  /** Accounts agy refused for the prompt being moved; they are skipped even when the family is unknown. */
+  readonly refused: readonly AccountName[];
 };
 
 export type ResolvePorts = {
@@ -70,7 +70,7 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   const exhausted = ports.exhausted ?? new Map();
   const family = request.family;
   const markedUntil = (name: AccountName) => (family === null ? undefined : exhaustedUntil(exhausted, name, family));
-  const outOf = (name: AccountName) => name === request.refused || markedUntil(name) !== undefined;
+  const outOf = (name: AccountName) => request.refused.includes(name) || markedUntil(name) !== undefined;
   const outOfQuota = family === null ? "out of quota" : `out of ${familyLabel(family)} quota`;
   // A thread keeps its account until agy refuses it for the family the thread
   // uses. Conversations live in one store shared by every account, so moving

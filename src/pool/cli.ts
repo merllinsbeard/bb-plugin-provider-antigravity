@@ -63,19 +63,20 @@ function checkProxy(name: string, route: ProxyRoute): void {
 }
 
 /**
- * `resolve <pid> [<refused account|-> <reset ms> [<family>]]`. The family comes
- * last so relays started before it existed, which pass only the refused
- * account and reset, still move off that account.
+ * `resolve <pid> [<refused accounts|-> <reset ms> [<family>]]`, the refused
+ * accounts comma-separated with the one that just refused first. The family
+ * comes last so relays started before it existed, which pass one refused
+ * account and the reset, still move off that account.
  */
 async function resolve(pidArg: string | undefined, rest: readonly string[]): Promise<void> {
   const pid = Number(pidArg);
   if (!Number.isInteger(pid) || pid <= 0) fail("agy-pool: resolve needs the launcher pid.");
   const [rawAccount, rawMs, rawFamily] = rest;
   const family = parseModelFamily(rawFamily ?? "");
-  const refused = parseAccountName(rawAccount ?? "");
+  const refused = (rawAccount ?? "").split(",").flatMap((raw) => parseAccountName(raw) ?? []);
   const resetMs = Number(rawMs);
-  if (family !== null && refused !== null && Number.isFinite(resetMs) && resetMs > 0)
-    markExhausted(exhaustionFile(paths.bindingsFile), refused, family, new Date(Date.now() + resetMs));
+  if (family !== null && refused[0] !== undefined && Number.isFinite(resetMs) && resetMs > 0)
+    markExhausted(exhaustionFile(paths.bindingsFile), refused[0], family, new Date(Date.now() + resetMs));
   const agy = requireAgy();
   const resolution = await resolveAccount(
     {

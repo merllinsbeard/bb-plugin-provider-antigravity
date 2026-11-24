@@ -32,7 +32,9 @@ rl.on("line", (line) => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
   record({ method: msg.method, params: msg.params });
-  if (msg.method === "initialize") {
+  if (msg.method === "initialize" && mode === "crash-on-init") {
+    process.exit(3);
+  } else if (msg.method === "initialize") {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
   } else if (msg.method === "session/new") {
     const sid = "sess-123";
