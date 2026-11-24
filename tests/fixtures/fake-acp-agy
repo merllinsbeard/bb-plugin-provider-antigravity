@@ -36,6 +36,17 @@ rl.on("line", (line) => {
     fs.mkdirSync(path.join(stateDir, "conversations"), { recursive: true });
     fs.writeFileSync(path.join(stateDir, "conversations", sid + ".db"), "history-from-" + name);
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
+    if (mode === "large-commands") {
+      const availableCommands = Array.from({ length: 400 }, (_, i) => ({
+        name: i === 0 ? "goal" : `skill-${String(i).padStart(3, "0")}`,
+        description: `Long description for command ${i}: ${"detail ".repeat(35)}`,
+      }));
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId: sid, update: { sessionUpdate: "available_commands_update", availableCommands } },
+      });
+    }
   } else if (msg.method === "session/load") {
     const sid = msg.params.sessionId;
     const convFile = path.join(stateDir, "conversations", sid + ".db");

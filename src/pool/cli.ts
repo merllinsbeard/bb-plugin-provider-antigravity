@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveAgyBinary } from "../usage/probe.ts";
@@ -12,7 +12,8 @@ import {
   listAccounts,
   parseAccountName,
   poolPaths,
-  shareConversations,
+  sharedGeminiConfigStatus,
+  syncAccountConfig,
   type Account,
   type Command,
 } from "./account.ts";
@@ -87,7 +88,7 @@ async function resolve(pidArg: string | undefined, exhaustArgs: readonly string[
     },
   );
   if (!resolution.ok) fail(resolution.message);
-  shareConversations(paths, resolution.account);
+  syncAccountConfig(paths, resolution.account);
   const command = accountCommand(paths, resolution.account, agy, [], { shareConversations: true });
   printPrefix({ ...command, env: { ...command.env, AGY_POOL_RESOLVED: resolution.account.name } });
 }
@@ -103,11 +104,6 @@ function prepareLogin(args: readonly string[]): void {
   const agy = requireAgy();
   const dir = name === DEFAULT_ACCOUNT ? paths.agyStateDir : path.join(paths.accountsRoot, name);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (name !== DEFAULT_ACCOUNT) {
-    const settings = path.join(paths.agyStateDir, "settings.json");
-    const copy = path.join(dir, "settings.json");
-    if (existsSync(settings) && !existsSync(copy)) copyFileSync(settings, copy);
-  }
   if (proxy !== null) {
     const file = path.join(dir, PROXY_FILE);
     writeFileSync(file, `${proxy.url}\n`, { mode: 0o600 });
@@ -115,6 +111,7 @@ function prepareLogin(args: readonly string[]): void {
   }
   const account = readAccount(name, dir);
   if (!isUsable(account)) fail(`agy-pool: account "${name}" is unusable: ${account.egress.problem}`);
+  syncAccountConfig(paths, account);
   if (account.egress.kind === "proxy") checkProxy(name, account.egress);
   printPrefix(accountCommand(paths, account, agy, []));
 }
@@ -150,6 +147,12 @@ async function list(): Promise<void> {
   process.stdout.write(`${JSON.stringify({ bindingsFile: paths.bindingsFile, accounts }, null, 2)}\n`);
 }
 
+function syncAll(): void {
+  const accounts = listAccounts(paths).map((account) => syncAccountConfig(paths, account));
+  const sharedRoot = path.join(home, ".gemini");
+  process.stdout.write(`${JSON.stringify({ sharedRoot, sharedFiles: sharedGeminiConfigStatus(home), accounts }, null, 2)}\n`);
+}
+
 const [command, arg, ...more] = process.argv.slice(2);
 switch (command) {
   case "resolve":
@@ -160,6 +163,9 @@ switch (command) {
     break;
   case "list":
     await list();
+    break;
+  case "sync":
+    syncAll();
     break;
   default:
     fail(`agy-pool: unknown command ${command ?? "(none)"}.`);

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 type RelayChild = ChildProcessByStdio<Writable, Readable, null>;
 import { parseAccountName, poolPaths, type AccountName } from "./account.ts";
+import { fitAvailableCommandsLine } from "./commands.ts";
 import { QUOTA_MESSAGE, isQuotaError, quotaResetMs } from "./exhaustion.ts";
 
 type Message = {
@@ -232,6 +233,7 @@ class Relay {
         }
         if (OUTPUT_UPDATES.has(update.sessionUpdate ?? "")) prompt.produced = true;
       }
+      return out(fitAvailableCommandsLine(line, message));
     }
     out(line);
   }

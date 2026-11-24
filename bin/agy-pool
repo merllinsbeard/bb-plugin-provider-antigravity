@@ -17,6 +17,7 @@ launch() {
 
 case "${1:-}" in
   list) exec node "$cli" list ;;
+  sync) exec node "$cli" sync ;;
   login)
     prefix=$(node "$cli" prepare-login "${@:2}")
     launch "$prefix" acp --login
