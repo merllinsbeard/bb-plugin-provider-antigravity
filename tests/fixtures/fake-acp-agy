@@ -38,7 +38,8 @@ rl.on("line", (line) => {
     const sid = "sess-123";
     fs.mkdirSync(path.join(stateDir, "conversations"), { recursive: true });
     fs.writeFileSync(path.join(stateDir, "conversations", sid + ".db"), "history-from-" + name);
-    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid, models: { currentModelId: modelOf(sid), availableModels: [] } } });
+    const noModel = fs.existsSync(path.join(stateDir, "fake-no-model"));
+    send({ jsonrpc: "2.0", id: msg.id, result: noModel ? { sessionId: sid } : { sessionId: sid, models: { currentModelId: modelOf(sid), availableModels: [] } } });
     if (mode === "large-commands") {
       const availableCommands = Array.from({ length: 400 }, (_, i) => ({
         name: i === 0 ? "goal" : `skill-${String(i).padStart(3, "0")}`,
@@ -65,6 +66,7 @@ rl.on("line", (line) => {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: sid } });
   } else if (msg.method && msg.method.startsWith("session/set_")) {
     if (msg.method === "session/set_model") models.set(msg.params.sessionId, msg.params.modelId);
+    if (msg.method === "session/set_config_option" && msg.params.configId === "model") models.set(msg.params.sessionId, msg.params.value);
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   } else if (msg.method === "session/prompt") {
     const sid = msg.params.sessionId;

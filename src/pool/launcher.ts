@@ -21,6 +21,8 @@ export type LaunchRequest = {
   readonly pid: number;
   /** The model family the thread needs, known once its session chose a model; null at first start. */
   readonly family: ModelFamily | null;
+  /** The account agy just refused for this thread; it is skipped even when the family is unknown. */
+  readonly refused: AccountName | null;
 };
 
 export type ResolvePorts = {
@@ -67,7 +69,8 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   };
   const exhausted = ports.exhausted ?? new Map();
   const family = request.family;
-  const outOf = (name: AccountName) => family !== null && exhaustedUntil(exhausted, name, family) !== undefined;
+  const markedUntil = (name: AccountName) => (family === null ? undefined : exhaustedUntil(exhausted, name, family));
+  const outOf = (name: AccountName) => name === request.refused || markedUntil(name) !== undefined;
   const outOfQuota = family === null ? "out of quota" : `out of ${familyLabel(family)} quota`;
   // A thread keeps its account until agy refuses it for the family the thread
   // uses. Conversations live in one store shared by every account, so moving
@@ -83,11 +86,16 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   const authenticated = signedIn.filter((account) => !outOf(account.name));
   if (authenticated.length === 0 && signedIn.length > 0) {
     const [nearest] = signedIn
-      .map((account) => [account.name, exhaustedUntil(exhausted, account.name, family!)!] as const)
+      .flatMap((account) => {
+        const until = markedUntil(account.name);
+        return until === undefined ? [] : [[account.name, until] as const];
+      })
       .sort((a, b) => a[1].localeCompare(b[1]));
     return {
       ok: false,
-      message: `agy-pool: every Antigravity account is ${outOfQuota}. The nearest reset is ${nearest![1]} (account "${nearest![0]}").`,
+      message: nearest
+        ? `agy-pool: every Antigravity account is ${outOfQuota}. The nearest reset is ${nearest[1]} (account "${nearest[0]}").`
+        : `agy-pool: every Antigravity account is ${outOfQuota}.`,
     };
   }
   const live = liveThreadCounts(bindings, ports.isAlive);

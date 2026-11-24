@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccountName } from "../src/pool/account.ts";
+import { modelFamily } from "../src/pool/family.ts";
 import { pickAccount } from "../src/pool/pick.ts";
 import type { ProviderQuota } from "../src/usage/types.ts";
 
@@ -112,6 +113,19 @@ describe("pickAccount", () => {
       reason: "all-exhausted",
       nearestReset: { account: "alt", at: new Date(RESET_5H).toISOString() },
     });
+  });
+});
+
+describe("modelFamily", () => {
+  it("files each agy model under the quota group that meters it", () => {
+    expect(["gemini-4-neon-high", "gemini-4-hydrogen-low", "gemini-3.8-flash-medium", "gemini-pro-orchestrator-neon"].map(modelFamily)).toEqual([
+      "gemini",
+      "gemini",
+      "gemini",
+      "gemini",
+    ]);
+    expect(["claude-opus-5-5-medium", "claude-sonnet-5-5-high", "gpt-oss-120b-medium"].map(modelFamily)).toEqual(["3p", "3p", "3p"]);
+    expect(["gemini-4-argon-high", "gemini-pro-orchestrator-argon"].map(modelFamily)).toEqual(["argon", "argon"]);
   });
 });
 

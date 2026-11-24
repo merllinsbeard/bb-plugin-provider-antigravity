@@ -1,16 +1,18 @@
 // agy meters models in groups ("Gemini Models", "Claude and GPT models"),
-// and each group has its own 5-hour and weekly windows. An account that ran
+// and each group has its own 5-hour and weekly windows. Argon has its own
+// weekly limit on Pro plans. An account that ran
 // out of one group can still serve every model of the other.
-export type ModelFamily = "gemini" | "3p";
+export type ModelFamily = "gemini" | "3p" | "argon";
 
-const LABELS: Record<ModelFamily, string> = { gemini: "Gemini", "3p": "Claude/GPT" };
+const LABELS: Record<ModelFamily, string> = { gemini: "Gemini", "3p": "Claude/GPT", argon: "Gemini Argon" };
 
 export function modelFamily(modelId: string): ModelFamily {
-  return /^(claude|gpt)-/i.test(modelId) ? "3p" : "gemini";
+  if (/^(claude|gpt)-/i.test(modelId)) return "3p";
+  return /argon/i.test(modelId) ? "argon" : "gemini";
 }
 
 export function parseModelFamily(raw: string): ModelFamily | null {
-  return raw === "gemini" || raw === "3p" ? raw : null;
+  return raw === "gemini" || raw === "3p" || raw === "argon" ? raw : null;
 }
 
 export function familyLabel(family: ModelFamily): string {

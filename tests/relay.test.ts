@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -338,6 +338,45 @@ describe("agy-pool ACP relay failover", () => {
     const gemini = startRelay("thr_gemini_stays");
     await openSession(gemini, "gemini-4-hydrogen-high");
     expect(JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads.thr_gemini_stays.account).toBe("alt");
+  });
+
+  it("moves off a refusing account even when agy never named the session's model", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+    for (const dir of [stateDir(), accountDir("alt")]) writeFileSync(path.join(dir, "fake-no-model"), "");
+
+    const r = startRelay("thr_unknown_model");
+    expect(await ask(r, await openSession(r), "Hi")).toBe("ANSWER(default):Hi");
+    expect(existsSync(statePath("exhausted.json"))).toBe(false);
+  });
+
+  it("follows a model chosen through session/set_config_option", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota-3p" });
+    markExhausted(statePath("exhausted.json"), parseAccountName("alt")!, "3p", new Date(Date.now() + 3_600_000));
+
+    const r = startRelay("thr_config_option");
+    const sid = await openSession(r);
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/set_config_option", params: { sessionId: sid, configId: "model", value: "claude-opus-5-5-high" } });
+    await r.nextMatching((m) => m.id === 3);
+    expect(await ask(r, sid, "Go")).toBe("ANSWER(default):Go");
+  });
+
+  it("still moves a thread off the refused account when a relay started before families calls resolve", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "ok" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "ok" });
+    const first = startRelay("thr_old_relay");
+    await openSession(first);
+    expect(JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads.thr_old_relay.account).toBe("alt");
+
+    const cli = fileURLToPath(new URL("../src/pool/cli.ts", import.meta.url));
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("BB_") && !k.startsWith("AGY_")));
+    const run = spawnSync(process.execPath, [cli, "resolve", String(process.pid), "alt", "60000"], {
+      env: { ...base, HOME: home, BB_THREAD_ID: "thr_old_relay", BB_ANTIGRAVITY_EXECUTABLE: fakeBin },
+      encoding: "utf8",
+    });
+    expect(run.stdout).toContain("AGY_POOL_RESOLVED=default");
+    expect(existsSync(statePath("exhausted.json"))).toBe(false);
   });
 
   it("compacts oversized available_commands_update payloads below BB's 64 KiB limit while keeping every command", async () => {

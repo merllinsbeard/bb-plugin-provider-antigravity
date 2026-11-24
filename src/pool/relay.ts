@@ -80,10 +80,8 @@ function parse(line: string): Message | null {
 function resolveLaunch(family: ModelFamily | null, exhaust?: { readonly account: AccountName; readonly resetMs: number }): Launch | null {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
-  if (family !== null) {
-    args.push(family);
-    if (exhaust !== undefined) args.push(exhaust.account, String(Math.round(exhaust.resetMs)));
-  }
+  if (exhaust !== undefined || family !== null)
+    args.push(exhaust?.account ?? "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -99,11 +97,14 @@ function resolveLaunch(family: ModelFamily | null, exhaust?: { readonly account:
 
 function start(launch: Launch): RelayChild {
   // Own process group, so a swap can stop agy inside bwrap without touching the relay.
-  return spawn(launch.command, [...launch.args, ...passArgs], {
+  const child = spawn(launch.command, [...launch.args, ...passArgs], {
     env: { ...process.env, ...launch.env },
     stdio: ["pipe", "pipe", "inherit"],
     detached: true,
   });
+  // A write to an agy that already exited must not crash the relay; its exit handler reports the end.
+  child.stdin.on("error", () => {});
+  return child;
 }
 
 function stop(child: RelayChild, signal: NodeJS.Signals = "SIGTERM"): void {
@@ -118,6 +119,14 @@ function stop(child: RelayChild, signal: NodeJS.Signals = "SIGTERM"): void {
       } catch {}
     }, 3_000).unref();
   }
+}
+
+/** The model agy reports for a session: the `model` config option, else the legacy `models` field. */
+function sessionModel(result: Record<string, unknown>): string | null {
+  const options = Array.isArray(result.configOptions) ? (result.configOptions as { id?: unknown; category?: unknown; currentValue?: unknown }[]) : [];
+  const option = options.find((candidate) => candidate.id === "model" || candidate.category === "model");
+  const current = option?.currentValue ?? (result.models as { currentModelId?: unknown } | undefined)?.currentModelId;
+  return typeof current === "string" ? current : null;
 }
 
 const out = (line: string): void => {
@@ -232,8 +241,8 @@ class Relay {
         const sessionId = message.result?.sessionId ?? opened.sessionId;
         if (typeof sessionId === "string") {
           this.sessions.set(sessionId, opened);
-          const current = (message.result?.models as { currentModelId?: unknown } | undefined)?.currentModelId;
-          if (typeof current === "string" && !this.models.has(sessionId)) this.models.set(sessionId, current);
+          const current = sessionModel(message.result ?? {});
+          if (current !== null && !this.models.has(sessionId)) this.models.set(sessionId, current);
         }
       }
       const prompt = this.prompts.get(key);
