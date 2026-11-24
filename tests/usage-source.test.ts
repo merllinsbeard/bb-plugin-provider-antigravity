@@ -76,10 +76,13 @@ function setup() {
   } as unknown as BbPluginApi;
   registerUsageSource(bb);
   const list = async () => usageResourceListSchema.parse(await handlers[usageListMethod]!({}));
-  const read = async (refresh = false, account = "default", hostId = "laptop", providerId = "antigravity") =>
+  const read = async (refresh = false, account: string | null = "default", hostId = "laptop", providerId = "antigravity") =>
     usageMeasurementSchema.parse(
       await handlers[usageFetchMethod]!(
-        usageFetchInputSchema.parse({ resourceId: JSON.stringify([hostId, providerId, account]), refresh }),
+        usageFetchInputSchema.parse({
+          resourceId: JSON.stringify(account === null ? [hostId, providerId] : [hostId, providerId, account]),
+          refresh,
+        }),
       ),
     );
   return { state, calls, reads, list, read, options: () => options };
@@ -112,7 +115,18 @@ describe("Antigravity usage source", () => {
       scope: { kind: "host", hostId, hostName },
     });
     expect(await source.list()).toEqual({
-      resources: [resource("laptop", "Laptop", "default"), resource("laptop", "Laptop", "acc2"), resource("server", "Server", "default")],
+      resources: [
+        {
+          id: JSON.stringify(["laptop", "antigravity"]),
+          accountKey: null,
+          providerId: "antigravity",
+          label: "Google Antigravity · all accounts",
+          scope: { kind: "host", hostId: "laptop", hostName: "Laptop" },
+        },
+        resource("laptop", "Laptop", "default"),
+        resource("laptop", "Laptop", "acc2"),
+        resource("server", "Server", "default"),
+      ],
     });
     expect(source.calls.map((call) => [call.method, call.hostId])).toEqual([[listAccountsMethod, "laptop"]]);
   });
@@ -125,10 +139,39 @@ describe("Antigravity usage source", () => {
     };
     const ids = (await source.list()).resources.map((resource) => JSON.parse(resource.id));
     expect(ids).toEqual([
+      ["laptop", "antigravity"],
       ["laptop", "antigravity", "default"],
       ["laptop", "antigravity", "acc2"],
       ["server", "antigravity", "default"],
     ]);
+  });
+
+  it("sums the weekly limits of every pool account into the all-accounts resource", async () => {
+    const source = setup();
+    source.state.next = async (account) =>
+      okUsage(
+        account === "acc2"
+          ? LIVE_WINDOWS.map((w) => (w.id === "3p-weekly" ? { ...w, usedPercent: 50, resetsAt: "2026-11-26T00:00:00.000Z" } : w))
+          : LIVE_WINDOWS,
+        account,
+      );
+    const total = await source.read(false, null);
+    expect(source.reads().map((call) => call.input.account)).toEqual(["default", "acc2"]);
+    expect(total.usage).toMatchObject({ status: "ok", accountEmail: "All accounts", planLabel: "2/2 accounts measured" });
+    const windows = total.usage.status === "ok" ? total.usage.windows : [];
+    expect(windows.map((w) => [w.label, w.usedPercent, w.resetsAt])).toEqual([
+      ["7d · Gemini", 39.9, "2026-11-28T15:54:51.000Z"],
+      ["7d · Claude/GPT", 25, "2026-11-26T00:00:00.000Z"],
+      ["7d · Argon", 0, "2026-11-30T09:23:21.000Z"],
+    ]);
+  });
+
+  it("counts only measured accounts in the total and says how many were measured", async () => {
+    const source = setup();
+    source.state.next = async (account) =>
+      account === "acc2" ? { status: "error", accountEmail: null, planLabel: null, message: "acc2 is not signed in." } : okUsage(LIVE_WINDOWS, account);
+    const total = await source.read(false, null);
+    expect(total.usage).toMatchObject({ status: "ok", planLabel: "1/2 accounts measured" });
   });
 
   it("reads exactly one account and returns its blocks unchanged", async () => {
