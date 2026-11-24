@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
@@ -116,7 +116,8 @@ export function accountCommand(
  * store was shared) into the shared store, then makes sure every shared folder
  * exists. An id the store already holds stays where it is. Idempotent.
  */
-export function shareConversations(paths: PoolPaths, account: Account): void {
+export function shareConversations(paths: PoolPaths, account: Account): number {
+  let migrated = 0;
   for (const dir of SHARED_DIRS) {
     const store = path.join(paths.agyStateDir, dir);
     mkdirSync(store, { recursive: true });
@@ -125,7 +126,66 @@ export function shareConversations(paths: PoolPaths, account: Account): void {
     if (!isDirectory(own)) continue;
     for (const entry of readdirSync(own)) {
       const target = path.join(store, entry);
-      if (!existsSync(target)) renameSync(path.join(own, entry), target);
+      if (!existsSync(target)) {
+        renameSync(path.join(own, entry), target);
+        migrated++;
+      }
     }
   }
+  return migrated;
+}
+
+export type SettingsSyncStatus = "default" | "unchanged" | "updated" | "missing-source";
+
+export type AccountSyncResult = {
+  readonly account: AccountName;
+  readonly dir: string;
+  readonly authenticated: boolean;
+  readonly settings: SettingsSyncStatus;
+  readonly migratedConversations: number;
+};
+
+/**
+ * Keeps user-editable settings (`settings.json`) and shared conversation folders
+ * synchronized from the default account into an added account directory without
+ * touching account-specific identity, auth, proxy, or runtime state files.
+ * Idempotent and atomic.
+ */
+export function syncAccountConfig(paths: PoolPaths, account: Account): AccountSyncResult {
+  const authenticated = isAuthenticated(account);
+  const migratedConversations = shareConversations(paths, account);
+  if (account.name === DEFAULT_ACCOUNT) {
+    return { account: account.name, dir: account.dir, authenticated, settings: "default", migratedConversations };
+  }
+  mkdirSync(account.dir, { recursive: true, mode: 0o700 });
+  const sourceFile = path.join(paths.agyStateDir, "settings.json");
+  if (!existsSync(sourceFile)) {
+    return { account: account.name, dir: account.dir, authenticated, settings: "missing-source", migratedConversations };
+  }
+  const sourceBytes = readFileSync(sourceFile);
+  const targetFile = path.join(account.dir, "settings.json");
+  if (existsSync(targetFile) && readFileSync(targetFile).equals(sourceBytes)) {
+    return { account: account.name, dir: account.dir, authenticated, settings: "unchanged", migratedConversations };
+  }
+  const tmpFile = path.join(account.dir, `.settings.json.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmpFile, sourceBytes, { mode: 0o600 });
+  chmodSync(tmpFile, 0o600);
+  renameSync(tmpFile, targetFile);
+  return { account: account.name, dir: account.dir, authenticated, settings: "updated", migratedConversations };
+}
+
+export const SHARED_GEMINI_FILES = [
+  "AGENTS.md",
+  "config/skills.json",
+  "config/mcp_config.json",
+  "config/hooks.json",
+  "config/config.json",
+] as const;
+
+export function sharedGeminiConfigStatus(home: string): Record<(typeof SHARED_GEMINI_FILES)[number], boolean> {
+  const geminiRoot = path.join(home, ".gemini");
+  return Object.fromEntries(SHARED_GEMINI_FILES.map((rel) => [rel, existsSync(path.join(geminiRoot, rel))])) as Record<
+    (typeof SHARED_GEMINI_FILES)[number],
+    boolean
+  >;
 }

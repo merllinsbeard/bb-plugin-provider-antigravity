@@ -372,4 +372,63 @@ describe("agy-pool launcher", () => {
       expect(existsSync(log) && readFileSync(log, "utf8").includes("--login")).toBe(false);
     });
   });
+
+  describe("account config sync", () => {
+    it("syncs settings.json across all accounts idempotently without touching per-account identity or auth files", async () => {
+      const defaultSettings = JSON.stringify({ allowNonWorkspaceAccess: true, toolPermission: "always-proceed" }, null, 2);
+      writeFileSync(path.join(stateDir(), "settings.json"), defaultSettings, { mode: 0o600 });
+      writeFileSync(path.join(stateDir(), "installation_id"), "default-install-id");
+      mkdirSync(path.join(home, ".gemini", "config"), { recursive: true });
+      writeFileSync(path.join(home, ".gemini", "AGENTS.md"), "# rules\n");
+      writeFileSync(path.join(home, ".gemini", "config", "skills.json"), '{"entries":[]}');
+
+      account(accountDir("acc2"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "acc2", proxy: PROXY });
+      writeFileSync(path.join(accountDir("acc2"), "antigravity-oauth-token"), '{"id_token_email":"acc2@example.com"}');
+      writeFileSync(path.join(accountDir("acc2"), "installation_id"), "acc2-install-id");
+      writeFileSync(path.join(accountDir("acc2"), "jetski_state.pbtxt"), 'installation_uuid: "acc2-uuid"\n');
+      writeFileSync(path.join(accountDir("acc2"), "settings.json"), '{"allowNonWorkspaceAccess":false}');
+
+      account(accountDir("acc4"), { signedIn: false, proxy: PROXY });
+
+      const first = await launch({}, ["sync"]);
+      expect(first.code).toBe(0);
+      const firstReport = JSON.parse(first.stdout);
+      expect(firstReport.sharedFiles["AGENTS.md"]).toBe(true);
+      expect(firstReport.sharedFiles["config/skills.json"]).toBe(true);
+      expect(firstReport.accounts.map((a: { account: string; settings: string }) => [a.account, a.settings])).toEqual([
+        ["default", "default"],
+        ["acc2", "updated"],
+        ["acc4", "updated"],
+      ]);
+
+      expect(readFileSync(path.join(accountDir("acc2"), "settings.json"), "utf8")).toBe(defaultSettings);
+      expect(readFileSync(path.join(accountDir("acc4"), "settings.json"), "utf8")).toBe(defaultSettings);
+      expect(statSync(path.join(accountDir("acc2"), "settings.json")).mode & 0o777).toBe(0o600);
+      expect(readFileSync(path.join(accountDir("acc2"), "antigravity-oauth-token"), "utf8")).toBe('{"id_token_email":"acc2@example.com"}');
+      expect(readFileSync(path.join(accountDir("acc2"), "installation_id"), "utf8")).toBe("acc2-install-id");
+      expect(readFileSync(path.join(accountDir("acc2"), "jetski_state.pbtxt"), "utf8")).toBe('installation_uuid: "acc2-uuid"\n');
+      expect(readFileSync(path.join(accountDir("acc2"), "agy-pool-proxy"), "utf8").trim()).toBe(PROXY);
+
+      const second = await launch({}, ["sync"]);
+      expect(second.code).toBe(0);
+      const secondReport = JSON.parse(second.stdout);
+      expect(secondReport.accounts.map((a: { account: string; settings: string }) => [a.account, a.settings])).toEqual([
+        ["default", "default"],
+        ["acc2", "unchanged"],
+        ["acc4", "unchanged"],
+      ]);
+    });
+
+    it("refreshes settings.json automatically when launching a non-default account", async () => {
+      const updated = JSON.stringify({ allowNonWorkspaceAccess: true, artifactReviewPolicy: "always-proceed" }, null, 2);
+      writeFileSync(path.join(stateDir(), "settings.json"), updated, { mode: 0o600 });
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      writeFileSync(path.join(accountDir("alt"), "settings.json"), '{"stale":true}');
+
+      const run = await launch({ BB_THREAD_ID: "thr_sync_on_launch" });
+      expect(run.code).toBe(0);
+      expect(accountOf(run.stdout)).toBe("alt");
+      expect(readFileSync(path.join(accountDir("alt"), "settings.json"), "utf8")).toBe(updated);
+    });
+  });
 });

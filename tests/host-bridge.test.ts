@@ -151,4 +151,14 @@ describe("host bridge", () => {
     expect(a).toEqual(b);
     expect(usageCalls()).toHaveLength(1);
   });
+
+  it("declares user and project native skill roots for BB composer and skill list", () => {
+    expect(antigravityDeclaration().experimental_nativeSkillRoots).toEqual({
+      user: [{ path: ".agents/skills" }, { path: ".gemini/antigravity/skills" }, { path: ".gemini/skills" }],
+      project: [
+        { path: ".agents/skills", ancestors: true },
+        { path: ".gemini/skills", ancestors: true },
+      ],
+    });
+  });
 });

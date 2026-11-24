@@ -6,6 +6,12 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseAccountName, shareConversations, type AccountName, type PoolPaths } from "../src/pool/account.ts";
+import {
+  MAX_PROVIDER_COMMANDS_BYTES,
+  fitAvailableCommands,
+  fitAvailableCommandsLine,
+  providerCommandsPayloadBytes,
+} from "../src/pool/commands.ts";
 import { QUOTA_MESSAGE, isQuotaError, markExhausted, quotaResetMs, readExhausted } from "../src/pool/exhaustion.ts";
 
 const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
@@ -269,5 +275,63 @@ describe("agy-pool ACP relay failover", () => {
       .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
       .map((m) => m.params.update.content.text);
     expect(chunks.join("")).toContain("Individual quota reached");
+  });
+
+  it("compacts oversized available_commands_update payloads below BB's 64 KiB limit while keeping every command", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.9, acpMode: "large-commands" });
+
+    const r = startRelay("thr_large_cmds");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    await r.nextMatching((m) => m.id === 2);
+    const update = await r.nextMatching(
+      (m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "available_commands_update",
+    );
+    const commands = update.params.update.availableCommands;
+    expect(commands).toHaveLength(400);
+    expect(commands[0].name).toBe("goal");
+    expect(providerCommandsPayloadBytes(commands)).toBeLessThanOrEqual(MAX_PROVIDER_COMMANDS_BYTES);
+    expect(providerCommandsPayloadBytes(commands)).toBeLessThan(65_536);
+  });
+});
+
+describe("fitAvailableCommands", () => {
+  it("passes small command lists through unchanged", () => {
+    const cmds = [
+      { name: "goal", description: "Run until done." },
+      { name: "plan", description: "Plan before coding." },
+    ];
+    expect(fitAvailableCommands(cmds)).toBe(cmds);
+    const msg = {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s", update: { sessionUpdate: "available_commands_update", availableCommands: cmds } },
+    };
+    const rawLine = JSON.stringify(msg);
+    expect(fitAvailableCommandsLine(rawLine, msg)).toBe(rawLine);
+  });
+
+  it("truncates descriptions to keep all commands inside the byte budget", () => {
+    const cmds = Array.from({ length: 400 }, (_, i) => ({
+      name: `skill-${i}`,
+      description: `Detailed explanation for skill ${i}: ${"кириллица ".repeat(25)}`,
+    }));
+    expect(providerCommandsPayloadBytes(cmds)).toBeGreaterThan(65_536);
+    const fitted = fitAvailableCommands(cmds, MAX_PROVIDER_COMMANDS_BYTES);
+    expect(fitted).toHaveLength(400);
+    expect(providerCommandsPayloadBytes(fitted)).toBeLessThanOrEqual(MAX_PROVIDER_COMMANDS_BYTES);
+    expect(String(fitted[0]!.description)).toMatch(/…$/);
+  });
+
+  it("trims the tail when even empty descriptions exceed the budget", () => {
+    const cmds = Array.from({ length: 450 }, (_, i) => ({
+      name: `very-long-command-name-${String(i).padStart(4, "0")}`,
+      description: "desc",
+    }));
+    const fitted = fitAvailableCommands(cmds, 2_000);
+    expect(fitted.length).toBeGreaterThan(0);
+    expect(fitted.length).toBeLessThan(cmds.length);
+    expect(providerCommandsPayloadBytes(fitted)).toBeLessThanOrEqual(2_000);
   });
 });
