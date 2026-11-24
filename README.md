@@ -5,9 +5,9 @@ Connects [Google Antigravity](https://antigravity.google) (`agy` CLI) to [bb](ht
 ## Features
 
 - **One provider, N accounts.** Several Google accounts sit behind the single `antigravity` provider in bb's model picker.
-- **Automatic quota-aware rotation.** When a new bb thread starts, the launcher reads live 5-hour and weekly quotas across all signed-in accounts (Gemini and Claude/GPT model groups) and picks the account with the most headroom. Ties go to the account with fewer live threads.
-- **Sticky thread bindings.** Each thread stays bound to the account it started on (`~/.local/state/agy-pool/bindings.json`), so conversation history stays intact across turns and restarts.
-- **Isolated accounts, shared config.** Extra accounts run in a narrow `bwrap` bind over `~/.gemini/antigravity-cli` (stored in `~/.local/share/agy-accounts/<name>/`), while `~/.gemini/config` (MCP servers, hooks, skills) and `~/.gemini/AGENTS.md` stay shared.
+- **Automatic quota-aware rotation & failover.** When a new bb thread starts, the launcher reads live 5-hour and weekly quotas across all signed-in accounts (Gemini and Claude/GPT model groups) and picks the account with the most headroom. Ties go to the account with fewer live threads. If the active account runs out of quota mid-session, the relay fails over seamlessly to another account with remaining headroom.
+- **Sticky thread bindings with shared history.** Each thread stays bound to the account it started on (`~/.local/state/agy-pool/bindings.json`), while conversation stores (`conversations/`, `brain/`, `annotations/`) are shared so threads can fail over without losing history.
+- **Isolated accounts, shared config.** Extra accounts run in a narrow `bwrap` bind over `~/.gemini/antigravity-cli` (stored in `~/.local/share/agy-accounts/<name>/`), while `~/.gemini/config` (MCP servers, hooks, skills) and `~/.gemini/AGENTS.md` stay shared. Native skill roots (`.agents/skills`, `.gemini/skills`, `.gemini/antigravity/skills`) are declared for bb's composer.
 - **Per-account fail-closed proxy.** Any account can own a dedicated `http`, `https`, or `socks5` proxy. Both agent traffic and quota probes leave through that proxy, while local and tailnet hosts stay direct via `NO_PROXY`. If the proxy goes down or its config is malformed, `agy` refuses to start instead of leaking the host IP.
 - **Native bb usage view.** Each pool account appears as its own block in bb's usage panel and `bb settings usage`, showing its Google email, route badge (`default · direct`, `acc2 · proxy`), and live 5h/7d bars for Gemini, Claude/GPT, and Argon.
 
@@ -57,13 +57,14 @@ When `--proxy` is passed, `agy-pool login` saves the proxy URL to `~/.local/shar
 
 Supported proxy schemes: `http://`, `https://`, and `socks5://` (credentials allowed).
 
-### 3. Inspect the pool
+### 3. Inspect and sync the pool
 
 ```sh
 ./bin/agy-pool list
+./bin/agy-pool sync
 ```
 
-Prints JSON with every account's sign-in state, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows.
+`list` prints JSON with every account's sign-in state, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows. `sync` propagates `settings.json` from the default account to every added pool account and migrates any unshared conversation folders without touching auth tokens or proxy files.
 
 ### 4. Override account selection (optional)
 
