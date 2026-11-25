@@ -5,23 +5,43 @@ import { registerQuotaHandoff, parsePoolExhaustion } from "../src/quota-handoff.
 const POOL_OUT =
   'agy-pool: every Antigravity account is out of Claude/GPT quota. The nearest reset is 2026-11-25T15:02:36.133Z (account "acc5").';
 
-type Setup = { settings?: Record<string, string | boolean>; errors?: Record<string, { id: string; message: string; detail?: string }> };
+type Row = { id: string; type: string; data?: Record<string, unknown> };
+type Failure = { id: string; message: string; detail?: string; type?: "system/error" | "provider/error" };
+type Setup = {
+  settings?: Record<string, string | boolean>;
+  /** The error that failed each thread's latest turn, written after that turn's request. */
+  errors?: Record<string, Failure>;
+  /** A thread's whole event log, oldest first, for cases one error cannot describe. */
+  logs?: Record<string, Row[]>;
+};
 
 /** A plugin host whose thread metadata lives in a map the test owns, so it survives a plugin reload like bb's does. */
-function host({ settings = {}, errors = {} }: Setup = {}) {
+function host({ settings = {}, errors = {}, logs = {} }: Setup = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
   let spawned = 0;
+  const log = (threadId: string): Row[] => {
+    if (logs[threadId] !== undefined) return logs[threadId];
+    const error = errors[threadId];
+    return error === undefined
+      ? []
+      : [
+          { id: `req_${error.id}`, type: "client/turn/requested" },
+          { id: error.id, type: error.type ?? "system/error", data: { message: error.message, detail: error.detail } },
+        ];
+  };
   const { bb, harness } = createFakePluginHost({
     pluginId: "provider-antigravity",
     settings,
     sdk: {
       threads: {
         events: {
-          list: async ({ threadId }: { threadId: string }) => {
-            const error = errors[threadId];
-            return error === undefined
-              ? []
-              : [{ id: error.id, seq: 7, type: "system/error", data: { code: "x", message: error.message, detail: error.detail } }];
+          // Like bb: oldest first unless `order: "desc"`, filtered by `types`, cut to `limit`.
+          list: async ({ threadId, types, order, limit }: { threadId: string; types?: string[]; order?: string; limit?: string }) => {
+            const rows = log(threadId)
+              .map((row, index) => ({ ...row, seq: index + 1, data: row.data ?? {} }))
+              .filter((row) => types === undefined || types.includes(row.type));
+            if (order === "desc") rows.reverse();
+            return limit === undefined ? rows : rows.slice(0, Number(limit));
           },
         },
         getPluginMetadata: async ({ threadId }: { threadId: string }) => metadata.get(threadId) ?? {},
@@ -77,6 +97,33 @@ describe("quota hand-off", () => {
     expect(input.text).toMatch(/^Continue from @thread:thr_src\n\n.*out of Claude\/GPT quota until 2026-11-25T15:02:36\.133Z/);
     expect(input.mentions[0]).toMatchObject({ start: 14, end: 14 + "@thread:thr_src".length, resource: { kind: "thread", threadId: "thr_src" } });
     expect(metadata.get("thr_src")).toEqual({ quotaHandoff: { failureEventId: "evt_1", successorThreadId: "thr_next1" } });
+  });
+
+  it("hands off a mid-session failure, which bb records as provider/error with the pool message in detail", async () => {
+    const { fail, spawns, metadata } = host({
+      errors: { thr_src: { id: "evt_p", type: "provider/error", message: "Provider error", detail: POOL_OUT } },
+    });
+    await fail({ id: "thr_src" });
+    expect(spawns()).toHaveLength(1);
+    expect(spawns()[0].input[0].text).toContain("out of Claude/GPT quota until 2026-11-25T15:02:36.133Z");
+    expect(metadata.get("thr_src")).toEqual({ quotaHandoff: { failureEventId: "evt_p", successorThreadId: "thr_next1" } });
+  });
+
+  it("ignores an exhaustion error from an earlier turn when the latest turn failed otherwise", async () => {
+    const stale: Row[] = [
+      { id: "req_1", type: "client/turn/requested" },
+      { id: "evt_old", type: "system/error", data: { message: "Command thread.start failed", detail: POOL_OUT } },
+      { id: "req_2", type: "client/turn/requested" },
+    ];
+    const { fail, spawns } = host({
+      logs: {
+        thr_unrelated: [...stale, { id: "evt_new", type: "provider/error", data: { message: "Provider error", detail: "agy exited during account swap" } }],
+        thr_no_error: stale,
+      },
+    });
+    await fail({ id: "thr_unrelated" });
+    await fail({ id: "thr_no_error" });
+    expect(spawns()).toHaveLength(0);
   });
 
   it("hands off a start-up failure, whose pool message sits in the error detail", async () => {
