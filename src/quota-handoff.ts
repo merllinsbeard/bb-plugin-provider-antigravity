@@ -96,8 +96,15 @@ export function registerQuotaHandoff(bb: BbPluginApi): void {
     try {
       const config = await settings.get();
       if (!config.quotaHandoff) return;
-      const [failure] = await bb.sdk.threads.events.list({ threadId: thread.id, order: "desc", limit: "1", types: ["system/error"] });
-      if (failure === undefined) return;
+      // The newest of these is what failed this turn: a prompt error is provider/error (agy-pool's text in `detail`), a
+      // start-up error is system/error. A turn request on top means this turn left no error, so an older one cannot count.
+      const [failure] = await bb.sdk.threads.events.list({
+        threadId: thread.id,
+        order: "desc",
+        limit: "1",
+        types: ["provider/error", "system/error", "client/turn/requested"],
+      });
+      if (failure === undefined || failure.type === "client/turn/requested") return;
       const data = failure.data as { message?: unknown; detail?: unknown };
       const exhaustion = parsePoolExhaustion([data.message, data.detail].filter((part) => typeof part === "string").join("\n"));
       if (exhaustion === null) return;
