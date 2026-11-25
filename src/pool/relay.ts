@@ -6,7 +6,9 @@
 // prompt again, so bb sees one uninterrupted turn. Quota is tracked per model
 // family: a refusal for Claude/GPT leaves the account open to Gemini, and a
 // prompt whose family is already known to be out on this account moves before
-// it is sent.
+// it is sent. When no account can take a refused prompt, the relay answers it
+// with a JSON-RPC error carrying the pool's reason, so bb fails the turn instead
+// of recording agy's refusal as a reply.
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
@@ -19,7 +21,7 @@ type RelayChild = ChildProcessByStdio<Writable, Readable, null>;
 import { parseAccountName, poolPaths, type AccountName } from "./account.ts";
 import { fitAvailableCommandsLine } from "./commands.ts";
 import { QUOTA_MESSAGE, exhaustedUntil, exhaustionFile, isQuotaError, quotaResetMs, readExhausted } from "./exhaustion.ts";
-import { modelFamily, type ModelFamily } from "./family.ts";
+import { familyLabel, modelFamily, type ModelFamily } from "./family.ts";
 
 type Message = {
   readonly id?: string | number | null;
@@ -35,6 +37,9 @@ type Launch = {
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
 };
+
+/** The pool's account choice, or the reason no account can start (the message `cli.ts resolve` printed). */
+type Resolution = { readonly ok: true; readonly launch: Launch } | { readonly ok: false; readonly message: string };
 
 type Refusal = {
   text: string;
@@ -78,26 +83,30 @@ function parse(line: string): Message | null {
   }
 }
 
-/** Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock; null when no account can start. */
+/** Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock. */
 function resolveLaunch(
   family: ModelFamily | null,
   exhaust?: { readonly accounts: readonly AccountName[]; readonly resetMs: number },
-): Launch | null {
+): Resolution {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
   if (exhaust !== undefined || family !== null)
     args.push(exhaust?.accounts.join(",") || "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
   const run = spawnSync("flock", args, {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  if (run.status !== 0) return null;
+  // bb shows the launcher's stderr when the agent exits, so the pool's own lines still go there.
+  const stderr = run.stderr ?? "";
+  process.stderr.write(stderr);
+  const failed = (): Resolution => ({ ok: false, message: stderr.trim() || "agy-pool: no Antigravity account could start." });
+  if (run.status !== 0) return failed();
   const lines = run.stdout.split("\n");
   const split = lines.indexOf("--");
-  if (split < 0) return null;
+  if (split < 0) return failed();
   const env = Object.fromEntries(lines.slice(0, split).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   const [command, ...cmdArgs] = lines.slice(split + 1);
-  return { account: parseAccountName(env.AGY_POOL_RESOLVED ?? ""), command: command!, args: cmdArgs, env };
+  return { ok: true, launch: { account: parseAccountName(env.AGY_POOL_RESOLVED ?? ""), command: command!, args: cmdArgs, env } };
 }
 
 function start(launch: Launch): RelayChild {
@@ -316,11 +325,19 @@ class Relay {
   private async swap(prompt: Prompt, response: string | null): Promise<void> {
     const buffered: string[] = [];
     this.swapping = buffered;
-    const giveUp = () => {
+    const fail = (code: number, message: string) => out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code, message } }));
+    // The account that refused; `attach` below replaces `this.account` with the one the swap moves to.
+    const from = this.account;
+    const outOf = prompt.family === null ? "quota" : `${familyLabel(prompt.family)} quota`;
+    // `reason` says why the prompt could not move: the pool's answer, or the error the new account gave.
+    const giveUp = (reason?: string) => {
       const alive = this.child.exitCode === null && this.child.signalCode === null;
-      if (response !== null) for (const line of [...prompt.refusal!.lines, response]) out(line);
-      else if (alive) this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
-      else out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code: -32603, message: "agy exited during account swap" } }));
+      if (!alive) fail(-32603, "agy exited during account swap");
+      // agy refused the prompt for quota and no account can take it: fail the turn rather than pass the refusal off as a reply.
+      else if (response !== null)
+        fail(-32000, reason ?? `agy-pool: account "${from}" is out of ${outOf} and the prompt could not move to another account.`);
+      // The prompt has not been sent yet; agy itself decides whether the account still serves it.
+      else this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
       // The agy this swap started died; nothing is left to carry the session.
       if (!alive) this.finish(1);
     };
@@ -329,20 +346,27 @@ class Relay {
       const refusedBy = this.account !== null && prompt.refusal !== null ? [this.account, ...prompt.refusedBy] : prompt.refusedBy;
       const exhaust =
         refusedBy.length > 0 ? { accounts: refusedBy, resetMs: prompt.refusal === null ? 0 : quotaResetMs(prompt.refusal.text) } : undefined;
-      const next = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust);
-      if (next === null || next.account === this.account) return giveUp();
+      const resolved = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust);
+      if (resolved === null) return giveUp();
+      if (!resolved.ok) return giveUp(resolved.message);
+      const next = resolved.launch;
+      if (next.account === this.account) return giveUp();
       const scope = prompt.family === null ? "quota" : `${prompt.family} quota`;
       process.stderr.write(`agy-pool: account "${this.account}" is out of ${scope}; moving to "${next.account}".\n`);
       const previous = this.child;
       this.attach(next);
       stop(previous);
+      const moveFailed = (step: string, error: unknown) => {
+        const detail = (error as { message?: unknown }).message;
+        return `agy-pool: account "${from}" is out of ${outOf}; moving the session to "${next.account}" failed at ${step}: ${typeof detail === "string" ? detail : JSON.stringify(error)}`;
+      };
       const ready = await this.request("initialize", this.initialize!.params);
-      if (ready.error) return giveUp();
+      if (ready.error) return giveUp(moveFailed("initialize", ready.error));
       for (const [sessionId, params] of this.sessions) {
         this.loading.add(sessionId);
         const loaded = await this.request("session/load", { ...params, sessionId });
         this.loading.delete(sessionId);
-        if (loaded.error) return giveUp();
+        if (loaded.error) return giveUp(moveFailed("session/load", loaded.error));
         for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
       }
       const message = prompt.produced
@@ -365,8 +389,9 @@ class Relay {
   }
 }
 
-const launch = resolveLaunch(null);
-if (launch === null) process.exit(1);
+const resolved = resolveLaunch(null);
+if (!resolved.ok) process.exit(1);
+const launch = resolved.launch;
 if (passArgs[0] === "acp") new Relay().run(launch);
 else {
   const child = spawn(launch.command, [...launch.args, ...passArgs], { env: { ...process.env, ...launch.env }, stdio: "inherit" });
