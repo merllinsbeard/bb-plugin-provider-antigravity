@@ -6,6 +6,7 @@
 // work is what this must not cause. Plugin-spawned threads stay out because the
 // plugin that started them owns their retries.
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { ANTIGRAVITY } from "./identity.ts";
 
 type ThreadResponse = PluginThreadEventPayloads["thread.failed"]["thread"];
@@ -74,6 +75,32 @@ function continuationInput(thread: ThreadResponse, exhaustion: PoolExhaustion) {
   ];
 }
 
+/**
+ * bb's own error notification opens the failed thread, which shows only the pool's error. On 25.11 the owner read it
+ * there and started the same task by hand next to the running successor, so a second notification opens the successor.
+ */
+async function announce(bb: BbPluginApi, thread: ThreadResponse, exhaustion: PoolExhaustion, successorId: string): Promise<void> {
+  const quota = exhaustion.family === null ? "quota" : `${exhaustion.family} quota`;
+  const reset = exhaustion.resetsAt === null ? "" : ` until ${exhaustion.resetsAt.slice(0, 10)} ${exhaustion.resetsAt.slice(11, 16)} UTC`;
+  try {
+    const { channels } = await bb.sdk.plugins.callRpc({
+      pluginId: "push-notifications",
+      method: "notifications.send",
+      input: {
+        // bb cuts the title at 80 characters, so the prefix stays short.
+        title: `Continues: ${thread.title ?? thread.titleFallback ?? thread.id}`,
+        body: `Every Antigravity account is out of ${quota}${reset}. The task goes on in a new thread; open it from here.`,
+        threadId: successorId,
+      },
+      outputSchema: z.object({ ok: z.literal(true), channels: z.array(z.string()) }),
+    });
+    if (channels.length === 0) bb.log.warn(`No notification channel took the hand-off notice of ${thread.id} to ${successorId}.`);
+  } catch (error) {
+    // The successor already runs; a missing notification channel must not undo or repeat the hand-off.
+    bb.log.warn(`Could not announce the hand-off of ${thread.id} to ${successorId}: ${(error as Error).message}`);
+  }
+}
+
 export function registerQuotaHandoff(bb: BbPluginApi): void {
   const settings = bb.settings.define({
     quotaHandoff: {
@@ -130,6 +157,8 @@ export function registerQuotaHandoff(bb: BbPluginApi): void {
           ...(execution === null ? {} : { permissionMode: "explicit" as const }),
         },
         input: continuationInput(thread, exhaustion),
+        // The owner finds the task by its name in the sidebar; a generated "Continue interrupted task" hid it on 25.11.
+        ...(thread.title === null ? {} : { title: thread.title }),
         visibility: "visible",
       });
       await bb.sdk.threads.updatePluginMetadata({
@@ -137,6 +166,7 @@ export function registerQuotaHandoff(bb: BbPluginApi): void {
         set: { [RECORD_KEY]: { failureEventId: failure.id, successorThreadId: successor.id } },
       });
       bb.log.info(`Thread ${thread.id} ran out of Antigravity quota; continued in ${successor.id}.`);
+      await announce(bb, thread, exhaustion, successor.id);
     } finally {
       inFlight.delete(thread.id);
     }
