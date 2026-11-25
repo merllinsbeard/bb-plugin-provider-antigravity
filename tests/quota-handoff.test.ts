@@ -13,11 +13,14 @@ type Setup = {
   errors?: Record<string, Failure>;
   /** A thread's whole event log, oldest first, for cases one error cannot describe. */
   logs?: Record<string, Row[]>;
+  /** What the push-notifications plugin does with a notification; it answers ok by default. */
+  notify?: (input: unknown) => Promise<unknown>;
 };
 
 /** A plugin host whose thread metadata lives in a map the test owns, so it survives a plugin reload like bb's does. */
-function host({ settings = {}, errors = {}, logs = {} }: Setup = {}) {
+function host({ settings = {}, errors = {}, logs = {}, notify = async () => ({ ok: true, channels: ["mobile"] }) }: Setup = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
+  const notifications: { pluginId: string; method: string; input: any }[] = [];
   let spawned = 0;
   const log = (threadId: string): Row[] => {
     if (logs[threadId] !== undefined) return logs[threadId];
@@ -53,6 +56,12 @@ function host({ settings = {}, errors = {}, logs = {} }: Setup = {}) {
         defaultExecutionOptions: async () => ({ model: "claude-opus-5-5", permissionMode: "full", reasoningLevel: "medium", serviceTier: "default", source: "client/turn/requested" }),
         spawn: async () => ({ id: `thr_next${++spawned}` }),
       },
+      plugins: {
+        callRpc: async ({ pluginId, method, input }: { pluginId: string; method: string; input: unknown }) => {
+          notifications.push({ pluginId, method, input });
+          return notify(input);
+        },
+      },
     } as never,
   });
   registerQuotaHandoff(bb);
@@ -62,7 +71,7 @@ function host({ settings = {}, errors = {}, logs = {} }: Setup = {}) {
       error: errors[thread.id]?.message ?? null,
     });
   const spawns = () => harness.inspection.sdk.callsTo("threads.spawn").map(([args]) => args as any);
-  return { bb, harness, fail, spawns, metadata };
+  return { bb, harness, fail, spawns, metadata, notifications };
 }
 
 describe("parsePoolExhaustion", () => {
@@ -96,6 +105,32 @@ describe("quota hand-off", () => {
     const [input] = spawn.input;
     expect(input.text).toMatch(/^Continue from @thread:thr_src\n\n.*out of Claude\/GPT quota until 2026-11-25T15:02:36\.133Z/);
     expect(input.mentions[0]).toMatchObject({ start: 14, end: 14 + "@thread:thr_src".length, resource: { kind: "thread", threadId: "thr_src" } });
+    expect(metadata.get("thr_src")).toEqual({ quotaHandoff: { failureEventId: "evt_1", successorThreadId: "thr_next1" } });
+  });
+
+  it("names the successor after the failed thread and sends a notification that opens the successor", async () => {
+    const { fail, spawns, notifications } = host({ errors });
+    await fail({ id: "thr_src", title: "Пост с отзывами" });
+
+    expect(spawns()[0].title).toBe("Пост с отзывами");
+    expect(notifications).toEqual([
+      {
+        pluginId: "push-notifications",
+        method: "notifications.send",
+        input: {
+          title: "Continued in a new thread: Пост с отзывами",
+          body: "Every Antigravity account is out of Claude/GPT quota until 15:02 UTC. The task goes on in a new thread; open it from here.",
+          threadId: "thr_next1",
+        },
+      },
+    ]);
+  });
+
+  it("keeps the hand-off when no notification channel takes the notice", async () => {
+    const { fail, spawns, metadata } = host({ errors, notify: async () => Promise.reject(new Error("not_delivered")) });
+    await fail({ id: "thr_src", title: null });
+    expect(spawns()).toHaveLength(1);
+    expect(spawns()[0]).not.toHaveProperty("title");
     expect(metadata.get("thr_src")).toEqual({ quotaHandoff: { failureEventId: "evt_1", successorThreadId: "thr_next1" } });
   });
 
