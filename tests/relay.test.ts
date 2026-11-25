@@ -270,7 +270,7 @@ describe("agy-pool ACP relay failover", () => {
     expect(existsSync(statePath("exhausted.json"))).toBe(false);
   });
 
-  it("forwards the quota refusal cleanly when every account is exhausted", async () => {
+  it("fails the prompt with the pool's exhaustion message when every account is out of quota", async () => {
     setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "quota" });
     setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
 
@@ -281,12 +281,15 @@ describe("agy-pool ACP relay failover", () => {
     const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
     r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Hi" }] } });
     const done = await r.nextMatching((m) => m.id === 3);
-    expect(done.result.stopReason).toBe("end_turn");
+    expect(done.result).toBeUndefined();
+    expect(done.error.message).toMatch(
+      /^agy-pool: every Antigravity account is out of Gemini quota\. The nearest reset is \S+Z \(account "(default|alt)"\)\.$/,
+    );
 
     const chunks = r.messages
       .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
       .map((m) => m.params.update.content.text);
-    expect(chunks.join("")).toContain("Individual quota reached");
+    expect(chunks.join("")).not.toContain("quota reached");
   });
 
   async function openSession(r: ReturnType<typeof startRelay>, model?: string): Promise<string> {
@@ -303,7 +306,8 @@ describe("agy-pool ACP relay failover", () => {
 
   async function ask(r: ReturnType<typeof startRelay>, sid: string, text: string): Promise<string> {
     r.send({ jsonrpc: "2.0", id: 4, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text }] } });
-    await r.nextMatching((m) => m.id === 4);
+    const done = await r.nextMatching((m) => m.id === 4);
+    if (done.error !== undefined) return `ERROR:${done.error.message}`;
     return r.messages
       .filter((m) => m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk")
       .map((m) => m.params.update.content.text)
@@ -315,7 +319,9 @@ describe("agy-pool ACP relay failover", () => {
     setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota-3p" });
 
     const claude = startRelay("thr_claude");
-    expect(await ask(claude, await openSession(claude, "claude-opus-5-5-medium"), "Hi")).toContain("Individual quota reached");
+    expect(await ask(claude, await openSession(claude, "claude-opus-5-5-medium"), "Hi")).toMatch(
+      /^ERROR:agy-pool: every Antigravity account is out of Claude\/GPT quota\. The nearest reset is /,
+    );
     const marks = JSON.parse(readFileSync(statePath("exhausted.json"), "utf8")).accounts;
     expect(Object.keys(marks).sort()).toEqual(["alt", "default"]);
     expect(Object.values(marks).map((families) => Object.keys(families as object))).toEqual([["3p"], ["3p"]]);
