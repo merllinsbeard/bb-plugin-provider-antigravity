@@ -194,8 +194,9 @@ describe("agy-pool launcher", () => {
   const accountDir = (account: string) => path.join(home, ".local", "share", "agy-accounts", account);
   const bindings = () => JSON.parse(readFileSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"), "utf8"));
 
-  function account(dir: string, opts: { usage?: Fractions; signedIn?: boolean; label?: string; proxy?: string }) {
+  function account(dir: string, opts: { usage?: Fractions; signedIn?: boolean; label?: string; proxy?: string; print?: "quota" | "throttle" }) {
     mkdirSync(dir, { recursive: true });
+    if (opts.print) writeFileSync(path.join(dir, "fake-print"), opts.print);
     if (opts.proxy !== undefined) writeFileSync(path.join(dir, "agy-pool-proxy"), `${opts.proxy}\n`, { mode: 0o600 });
     if (opts.signedIn ?? true) writeFileSync(path.join(dir, "antigravity-oauth-token"), "");
     if (opts.usage) writeFileSync(path.join(dir, "fake-usage.json"), usageJson(opts.usage));
@@ -291,11 +292,93 @@ describe("agy-pool launcher", () => {
     expect(existsSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"))).toBe(false);
   });
 
+  describe("one-shot print runs", () => {
+    const exhausted = () => JSON.parse(readFileSync(path.join(home, ".local", "state", "agy-pool", "exhausted.json"), "utf8"));
+    const print = (model: string) => ["-p", "draw an apple", "--model", model, "--output-format", "json"];
+
+    it("runs on the account with the most room for the model's family and binds no thread", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      const run = await launch({ BB_THREAD_ID: "thr_caller" }, print("gemini-3.8-flash-low"));
+      expect(run.code).toBe(0);
+      expect(JSON.parse(run.stdout).response).toBe("ran on alt");
+      expect(existsSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"))).toBe(false);
+    });
+
+    it("picks by the family of --model", async () => {
+      account(stateDir(), { usage: { gemini5h: 0.1, geminiWeekly: 0.1, other5h: 0.9, otherWeekly: 0.9 } });
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1, other5h: 0, otherWeekly: 0.1 }, label: "alt" });
+      const run = await launch({}, print("claude-sonnet-5-5-low"));
+      expect(JSON.parse(run.stdout).response).toBe("ran on default");
+    });
+
+    it("runs a refused prompt again on the next account and marks the refusal until agy's reset", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", print: "quota" });
+      const before = Date.now();
+      const run = await launch({}, print("gemini-3.8-flash-low"));
+      expect(run.code).toBe(0);
+      expect(run.stdout.trim().split("\n")).toHaveLength(1);
+      expect(JSON.parse(run.stdout).response).toBe("ran on default");
+      expect(run.stderr).toContain('agy-pool: account "alt" is out of Gemini quota; running again on another account.');
+      const until = Date.parse(exhausted().accounts.alt.gemini);
+      expect(until - before).toBeGreaterThanOrEqual(2 * 3600 * 1000 - 1000);
+      expect(until - before).toBeLessThan(2 * 3600 * 1000 + 60 * 1000);
+    });
+
+    it("does not move a run forced onto an account with AGY_POOL_ACCOUNT", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", print: "quota" });
+      const run = await launch({ AGY_POOL_ACCOUNT: "alt" }, print("gemini-3.8-flash-low"));
+      expect(run.code).toBe(3);
+      expect(JSON.parse(run.stdout).status).toBe("ERROR");
+      expect(run.stderr).not.toContain("running again");
+    });
+
+    it("moves a throttled run without marking the account", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", print: "throttle" });
+      const run = await launch({}, print("gemini-3.8-flash-low"));
+      expect(run.code).toBe(0);
+      expect(JSON.parse(run.stdout).response).toBe("ran on default");
+      expect(existsSync(path.join(home, ".local", "state", "agy-pool", "exhausted.json"))).toBe(false);
+    });
+
+    it("gives a stream-json run one attempt with agy's own output", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", print: "quota" });
+      const run = await launch({}, ["-p", "draw an apple", "--model", "gemini-3.8-flash-low", "--output-format", "stream-json"]);
+      expect(run.code).toBe(3);
+      expect(JSON.parse(run.stdout).status).toBe("ERROR");
+      expect(run.stderr).not.toContain("running again");
+    });
+
+    it("runs a non-print call once with its exit code and binds no thread", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      const run = await launch({ BB_THREAD_ID: "thr_caller" }, ["--version"]);
+      expect(run.code).toBe(0);
+      expect(run.stdout.trim()).toBe("1.5.15");
+      expect(existsSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"))).toBe(false);
+    });
+
+    it("hands back agy's refusal and the pool's reason when every account refuses", async () => {
+      account(stateDir(), { usage: { gemini5h: 0.5, geminiWeekly: 0.5 }, print: "quota" });
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt", print: "quota" });
+      const run = await launch({}, print("gemini-3.8-flash-low"));
+      expect(run.code).toBe(3);
+      expect(JSON.parse(run.stdout).status).toBe("ERROR");
+      expect(run.stderr).toMatch(/every Antigravity account is out of Gemini quota\. The nearest reset is \S+ \(account "(alt|default)"\)/);
+      expect(Object.keys(exhausted().accounts).sort()).toEqual(["alt", "default"]);
+    });
+  });
+
   it("passes arguments, stdin and the exit code through to agy", async () => {
     account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
     const run = await launch({ BB_THREAD_ID: "thr_five", AGY_FAKE_EXIT: "7" }, ["acp", "--dangerously-skip-permissions"], "hello over stdio\n");
     expect(run.code).toBe(7);
     expect(run.stdout).toMatch(/account=alt pid=\d+ args=acp --dangerously-skip-permissions\nhello over stdio\n$/);
+  });
+
+  it("binds an ACP thread even when the caller's environment carries the one-shot flag", async () => {
+    account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+    const run = await launch({ BB_THREAD_ID: "thr_leak", AGY_POOL_ONE_SHOT: "1" }, ["acp"], "");
+    expect(run.code).toBe(0);
+    expect(readFileSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"), "utf8")).toContain("thr_leak");
   });
 
   it("spreads threads that start together across accounts with equal quota", async () => {
