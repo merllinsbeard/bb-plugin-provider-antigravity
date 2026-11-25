@@ -36,6 +36,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "better-sqlite3": "^13.2.0",
+    "cron-parser": "^5.10.6",
+    "hono": "^4.13.22",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
   }
