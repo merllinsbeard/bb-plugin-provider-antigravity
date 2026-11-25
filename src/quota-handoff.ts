@@ -81,18 +81,20 @@ function continuationInput(thread: ThreadResponse, exhaustion: PoolExhaustion) {
  */
 async function announce(bb: BbPluginApi, thread: ThreadResponse, exhaustion: PoolExhaustion, successorId: string): Promise<void> {
   const quota = exhaustion.family === null ? "quota" : `${exhaustion.family} quota`;
-  const reset = exhaustion.resetsAt === null ? "" : ` until ${exhaustion.resetsAt.slice(11, 16)} UTC`;
+  const reset = exhaustion.resetsAt === null ? "" : ` until ${exhaustion.resetsAt.slice(0, 10)} ${exhaustion.resetsAt.slice(11, 16)} UTC`;
   try {
-    await bb.sdk.plugins.callRpc({
+    const { channels } = await bb.sdk.plugins.callRpc({
       pluginId: "push-notifications",
       method: "notifications.send",
       input: {
-        title: `Continued in a new thread: ${thread.title ?? thread.titleFallback ?? thread.id}`,
+        // bb cuts the title at 80 characters, so the prefix stays short.
+        title: `Continues: ${thread.title ?? thread.titleFallback ?? thread.id}`,
         body: `Every Antigravity account is out of ${quota}${reset}. The task goes on in a new thread; open it from here.`,
         threadId: successorId,
       },
-      outputSchema: z.object({ ok: z.literal(true) }).passthrough(),
+      outputSchema: z.object({ ok: z.literal(true), channels: z.array(z.string()) }),
     });
+    if (channels.length === 0) bb.log.warn(`No notification channel took the hand-off notice of ${thread.id} to ${successorId}.`);
   } catch (error) {
     // The successor already runs; a missing notification channel must not undo or repeat the hand-off.
     bb.log.warn(`Could not announce the hand-off of ${thread.id} to ${successorId}: ${(error as Error).message}`);

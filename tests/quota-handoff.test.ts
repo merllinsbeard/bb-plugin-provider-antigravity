@@ -118,8 +118,8 @@ describe("quota hand-off", () => {
         pluginId: "push-notifications",
         method: "notifications.send",
         input: {
-          title: "Continued in a new thread: Пост с отзывами",
-          body: "Every Antigravity account is out of Claude/GPT quota until 15:02 UTC. The task goes on in a new thread; open it from here.",
+          title: "Continues: Пост с отзывами",
+          body: "Every Antigravity account is out of Claude/GPT quota until 2026-11-25 15:02 UTC. The task goes on in a new thread; open it from here.",
           threadId: "thr_next1",
         },
       },
@@ -127,8 +127,9 @@ describe("quota hand-off", () => {
   });
 
   it("keeps the hand-off when no notification channel takes the notice", async () => {
-    const { fail, spawns, metadata } = host({ errors, notify: async () => Promise.reject(new Error("not_delivered")) });
-    await fail({ id: "thr_src", title: null });
+    const { fail, spawns, metadata } = host({ errors, notify: async () => Promise.reject(new Error("rpc failed")) });
+    // The harness collects handler errors instead of throwing them; the hand-off must leave none.
+    expect(await fail({ id: "thr_src", title: null })).toEqual({ errors: [] });
     expect(spawns()).toHaveLength(1);
     expect(spawns()[0]).not.toHaveProperty("title");
     expect(metadata.get("thr_src")).toEqual({ quotaHandoff: { failureEventId: "evt_1", successorThreadId: "thr_next1" } });
