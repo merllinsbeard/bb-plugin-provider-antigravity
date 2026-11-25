@@ -93,6 +93,7 @@ async function resolve(pidArg: string | undefined, rest: readonly string[]): Pro
       pid,
       family,
       refused,
+      oneShot: process.env.AGY_POOL_ONE_SHOT === "1",
     },
   );
   if (!resolution.ok) fail(resolution.message);

@@ -68,7 +68,17 @@ Supported proxy schemes: `http://`, `https://`, and `socks5://` (credentials all
 
 `list` prints JSON with every account's sign-in state, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows. `sync` propagates `settings.json` from the default account to every added pool account and migrates any unshared conversation folders without touching auth tokens or proxy files.
 
-### 4. Override account selection (optional)
+### 4. One-shot runs (`agy -p`)
+
+Anything other than `agy-pool acp` runs agy once on the pool, so scripts get the same balancing as threads:
+
+```bash
+agy-pool -p "Generate one image of a red apple" --model gemini-3.8-flash-low --output-format json
+```
+
+The run starts on the account with the most room for the family of `--model` (all families when it is omitted) and records no thread binding, so a Claude Code thread that shells out to it is never bound to an account. In print mode (`-p`, `--print`, `--prompt`) a run agy refuses for quota marks that account until the reset agy named and runs again on the next one; only the last run's stdout reaches the caller, and when no account is left, the caller gets agy's refusal plus the pool's reason with the nearest reset on stderr. `AGY_POOL_ACCOUNT` pins the run to one account and turns this off. baoyu-image-gen's `antigravity` provider draws through this path.
+
+### 5. Override account selection (optional)
 
 Set `AGY_POOL_ACCOUNT=<name>` to force a specific account without recording a thread binding.
 

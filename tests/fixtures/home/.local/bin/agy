@@ -18,6 +18,17 @@ if [ "$1" = "acp" ]; then
   cat
   exit "${AGY_FAKE_EXIT:-0}"
 fi
+# A print-mode prompt (not the /usage probe): an account whose fake-print says
+# "quota" refuses it the way agy 1.5 does (exit 3, JSON error, "Resets in").
+if [ "$1" = "-p" ] && [ "$2" != "/usage" ]; then
+  if [ "$(cat "$state/fake-print" 2>/dev/null)" = "quota" ]; then
+    echo '{"status":"ERROR","response":"","error":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h0m0s."}'
+    echo 'error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h0m0s.' >&2
+    exit 3
+  fi
+  printf '{"status":"SUCCESS","response":"ran on %s"}\n' "$name"
+  exit 0
+fi
 case "$AGY_FAKE_MODE" in
   auth)
     echo "Authentication required. Opening browser to sign in..." >&2

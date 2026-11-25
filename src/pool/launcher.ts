@@ -23,6 +23,12 @@ export type LaunchRequest = {
   readonly family: ModelFamily | null;
   /** Accounts agy refused for the prompt being moved; they are skipped even when the family is unknown. */
   readonly refused: readonly AccountName[];
+  /**
+   * A one-shot `agy -p` run, not a thread: it gets the account with the most
+   * room for its family, as a new thread does, and records no binding, so the
+   * calling thread (often a Claude Code one) is never bound to an account.
+   */
+  readonly oneShot?: boolean;
 };
 
 export type ResolvePorts = {
@@ -51,17 +57,19 @@ function launchable(account: Account): Resolution {
 
 export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest): Promise<Resolution> {
   const accounts = listAccounts(ports.paths);
-  if (request.threadId === null || request.requestedAccount !== null) {
+  const oneShot = request.oneShot === true;
+  if (request.requestedAccount !== null || (request.threadId === null && !oneShot)) {
     const name = request.requestedAccount ?? DEFAULT_ACCOUNT;
     const account = byName(accounts, name);
     if (!account) return { ok: false, message: `agy-pool: no account named "${name}".` };
     return launchable(account);
   }
-  const threadId = request.threadId;
+  const threadId = oneShot ? null : request.threadId;
   const bindings = readBindings(ports.paths.bindingsFile);
-  const bound = bindings.get(threadId);
+  const bound = threadId === null ? undefined : bindings.get(threadId);
   const boundAt = (ports.now ?? (() => new Date()))().toISOString();
   const record = (account: UsableAccount, since: string) => {
+    if (threadId === null) return { ok: true as const, account };
     const next = new Map(bindings);
     next.set(threadId, { account: account.name, pid: request.pid, boundAt: since });
     writeBindings(ports.paths.bindingsFile, next);

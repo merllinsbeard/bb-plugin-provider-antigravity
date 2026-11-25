@@ -83,10 +83,14 @@ function parse(line: string): Message | null {
   }
 }
 
-/** Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock. */
+/**
+ * Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock.
+ * A one-shot run (`agy -p` and other non-ACP calls) is picked like a new thread but bound to nothing.
+ */
 function resolveLaunch(
   family: ModelFamily | null,
   exhaust?: { readonly accounts: readonly AccountName[]; readonly resetMs: number },
+  oneShot = false,
 ): Resolution {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
@@ -95,6 +99,7 @@ function resolveLaunch(
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    ...(oneShot ? { env: { ...process.env, AGY_POOL_ONE_SHOT: "1" } } : {}),
   });
   // bb shows the launcher's stderr when the agent exits, so the pool's own lines still go there.
   const stderr = run.stderr ?? "";
@@ -389,12 +394,101 @@ class Relay {
   }
 }
 
-const resolved = resolveLaunch(null);
-if (!resolved.ok) process.exit(1);
-const launch = resolved.launch;
-if (passArgs[0] === "acp") new Relay().run(launch);
-else {
-  const child = spawn(launch.command, [...launch.args, ...passArgs], { env: { ...process.env, ...launch.env }, stdio: "inherit" });
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
-  child.on("exit", (code, signal) => process.exit(code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : 1)));
+/** The value of agy's `--model` flag, in the `--model x` or `--model=x` form. */
+function modelArg(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--model") return args[i + 1];
+    if (arg.startsWith("--model=")) return arg.slice("--model=".length);
+  }
+  return undefined;
 }
+
+/** agy's print mode (`-p`, `--print`, `--prompt`) runs one turn and exits, so the pool can run it again elsewhere. */
+function isPrintMode(args: readonly string[]): boolean {
+  return args.some((arg) => /^(-p|--print|--prompt)(=|$)/.test(arg));
+}
+
+type Attempt = { readonly code: number; readonly stdout: string; readonly stderr: string };
+
+let current: ReturnType<typeof spawn> | null = null;
+
+const exitCode = (code: number | null, signal: NodeJS.Signals | null) => code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : 1);
+
+/** One print-mode run of agy: stderr streams through, stdout is held so a refused run never reaches the caller. */
+function attempt(launch: Launch): Promise<Attempt> {
+  return new Promise((resolve) => {
+    const child = spawn(launch.command, [...launch.args, ...passArgs], {
+      env: { ...process.env, ...launch.env },
+      stdio: ["inherit", "pipe", "pipe"],
+    });
+    current = child;
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.on("data", (chunk) => (stdout += chunk));
+    child.stderr!.on("data", (chunk) => {
+      stderr += chunk;
+      process.stderr.write(chunk);
+    });
+    child.on("close", (code, signal) => {
+      current = null;
+      resolve({ code: exitCode(code, signal), stdout, stderr });
+    });
+  });
+}
+
+/** Writes the held stdout, then exits with agy's code once the pipe took it. */
+function finish(stdout: string, code: number): void {
+  process.stdout.write(stdout, () => process.exit(code));
+}
+
+/**
+ * A non-ACP call such as `agy -p`. It starts on the account with the most room
+ * for the model's family and records no thread binding. In print mode, a run
+ * agy refuses for quota marks that account until the reset agy named and runs
+ * again on the next one; when no account is left, the last refusal and the
+ * pool's reason (nearest reset) reach the caller.
+ */
+async function runOnce(): Promise<void> {
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const)
+    process.on(signal, () => (current ? current.kill(signal) : process.exit(128 + os.constants.signals[signal])));
+  const model = modelArg(passArgs);
+  const family = model === undefined ? null : modelFamily(model);
+  const print = isPrintMode(passArgs);
+  const refused: AccountName[] = [];
+  let exhaust: { readonly accounts: readonly AccountName[]; readonly resetMs: number } | undefined;
+  let last: Attempt | null = null;
+  for (;;) {
+    const resolved = resolveLaunch(family, exhaust, true);
+    if (!resolved.ok) {
+      if (last) return finish(last.stdout, last.code || 1);
+      process.exit(1);
+    }
+    const launch = resolved.launch;
+    if (!print) {
+      const child = spawn(launch.command, [...launch.args, ...passArgs], { env: { ...process.env, ...launch.env }, stdio: "inherit" });
+      current = child;
+      child.on("exit", (code, signal) => process.exit(exitCode(code, signal)));
+      return;
+    }
+    const result = await attempt(launch);
+    const text = `${result.stdout}\n${result.stderr}`;
+    // An account forced with AGY_POOL_ACCOUNT is the caller's choice: its refusal goes back as is.
+    const movable = launch.account !== null && !process.env.AGY_POOL_ACCOUNT && refused.length < MAX_SWAPS;
+    if (result.code !== 0 && isQuotaError(text) && movable) {
+      refused.unshift(launch.account!);
+      exhaust = { accounts: refused, resetMs: quotaResetMs(text) };
+      last = result;
+      const label = family === null ? "" : `${familyLabel(family)} `;
+      process.stderr.write(`agy-pool: account "${launch.account}" is out of ${label}quota; running again on another account.\n`);
+      continue;
+    }
+    return finish(result.stdout, result.code);
+  }
+}
+
+if (passArgs[0] === "acp") {
+  const resolved = resolveLaunch(null);
+  if (!resolved.ok) process.exit(1);
+  new Relay().run(resolved.launch);
+} else await runOnce();
