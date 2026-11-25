@@ -53,6 +53,8 @@ rl.on("line", (line) => {
         params: { sessionId: sid, update: { sessionUpdate: "available_commands_update", availableCommands } },
       });
     }
+  } else if (msg.method === "session/load" && mode === "load-error") {
+    send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "conversation store is locked" } });
   } else if (msg.method === "session/load") {
     const sid = msg.params.sessionId;
     const convFile = path.join(stateDir, "conversations", sid + ".db");

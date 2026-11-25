@@ -326,15 +326,16 @@ class Relay {
     const buffered: string[] = [];
     this.swapping = buffered;
     const fail = (code: number, message: string) => out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code, message } }));
-    // `reason` is the pool's answer when it found no account for this prompt.
+    // The account that refused; `attach` below replaces `this.account` with the one the swap moves to.
+    const from = this.account;
+    const outOf = prompt.family === null ? "quota" : `${familyLabel(prompt.family)} quota`;
+    // `reason` says why the prompt could not move: the pool's answer, or the error the new account gave.
     const giveUp = (reason?: string) => {
       const alive = this.child.exitCode === null && this.child.signalCode === null;
       if (!alive) fail(-32603, "agy exited during account swap");
       // agy refused the prompt for quota and no account can take it: fail the turn rather than pass the refusal off as a reply.
-      else if (response !== null) {
-        const scope = prompt.family === null ? "quota" : `${familyLabel(prompt.family)} quota`;
-        fail(-32000, reason ?? `agy-pool: account "${this.account}" is out of ${scope} and the prompt could not move to another account.`);
-      }
+      else if (response !== null)
+        fail(-32000, reason ?? `agy-pool: account "${from}" is out of ${outOf} and the prompt could not move to another account.`);
       // The prompt has not been sent yet; agy itself decides whether the account still serves it.
       else this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
       // The agy this swap started died; nothing is left to carry the session.
@@ -355,13 +356,17 @@ class Relay {
       const previous = this.child;
       this.attach(next);
       stop(previous);
+      const moveFailed = (step: string, error: unknown) => {
+        const detail = (error as { message?: unknown }).message;
+        return `agy-pool: account "${from}" is out of ${outOf}; moving the session to "${next.account}" failed at ${step}: ${typeof detail === "string" ? detail : JSON.stringify(error)}`;
+      };
       const ready = await this.request("initialize", this.initialize!.params);
-      if (ready.error) return giveUp();
+      if (ready.error) return giveUp(moveFailed("initialize", ready.error));
       for (const [sessionId, params] of this.sessions) {
         this.loading.add(sessionId);
         const loaded = await this.request("session/load", { ...params, sessionId });
         this.loading.delete(sessionId);
-        if (loaded.error) return giveUp();
+        if (loaded.error) return giveUp(moveFailed("session/load", loaded.error));
         for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
       }
       const message = prompt.produced

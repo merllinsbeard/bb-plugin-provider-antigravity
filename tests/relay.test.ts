@@ -292,6 +292,22 @@ describe("agy-pool ACP relay failover", () => {
     expect(chunks.join("")).not.toContain("quota reached");
   });
 
+  it("names the refusing account and the new account's error when the session cannot move", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "load-error" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, acpMode: "quota" });
+
+    const r = startRelay("thr_load_fails");
+    r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await r.nextMatching((m) => m.id === 1);
+    r.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } });
+    const sid = (await r.nextMatching((m) => m.id === 2)).result.sessionId;
+    r.send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Hi" }] } });
+    const done = await r.nextMatching((m) => m.id === 3);
+    expect(done.error.message).toBe(
+      'agy-pool: account "alt" is out of Gemini quota; moving the session to "default" failed at session/load: conversation store is locked',
+    );
+  });
+
   async function openSession(r: ReturnType<typeof startRelay>, model?: string): Promise<string> {
     r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
     await r.nextMatching((m) => m.id === 1);
