@@ -10,7 +10,7 @@ Connects [Google Antigravity](https://antigravity.google) (`agy` CLI) to [bb](ht
 - **Isolated accounts, shared config.** Extra accounts run in a narrow `bwrap` bind over `~/.gemini/antigravity-cli` (stored in `~/.local/share/agy-accounts/<name>/`), while `~/.gemini/config` (MCP servers, hooks, skills) and `~/.gemini/AGENTS.md` stay shared. Native skill roots (`.agents/skills`, `.gemini/skills`, `.gemini/antigravity/skills`) are declared for bb's composer.
 - **Per-account fail-closed proxy.** Any account can own a dedicated `http`, `https`, or `socks5` proxy. Both agent traffic and quota probes leave through that proxy, while local and tailnet hosts stay direct via `NO_PROXY`. If the proxy goes down or its config is malformed, `agy` refuses to start instead of leaking the host IP.
 - **Native bb usage view.** Each pool account appears as its own block in bb's usage panel and `bb settings usage`, showing its Google email, route badge (`default · direct`, `acc2 · proxy`), and live 5h/7d bars for Gemini, Claude/GPT, and Argon. An **All accounts** block on top sums each weekly limit over the pool: its bar is the mean use of the measured accounts, its reset is the earliest one, and its badge says how many accounts were measured.
-- **Opus by default.** New threads start on Claude Opus 5.5 at Medium reasoning instead of agy's own pick (`src/default-model.ts`).
+- **Neon by default.** New threads start on Gemini 4 Neon at High reasoning instead of agy's own pick (`src/default-model.ts`). Claude models stay selectable; they draw on the accounts' small Claude/GPT window.
 
 ## Requirements
 
