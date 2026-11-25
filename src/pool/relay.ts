@@ -96,10 +96,12 @@ function resolveLaunch(
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
   if (exhaust !== undefined || family !== null)
     args.push(exhaust?.accounts.join(",") || "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
+  // A one-shot flag left in the caller's environment must not turn a thread's launch into an unbound pick.
+  const { AGY_POOL_ONE_SHOT: _inherited, ...callerEnv } = process.env;
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    ...(oneShot ? { env: { ...process.env, AGY_POOL_ONE_SHOT: "1" } } : {}),
+    env: oneShot ? { ...callerEnv, AGY_POOL_ONE_SHOT: "1" } : callerEnv,
   });
   // bb shows the launcher's stderr when the agent exits, so the pool's own lines still go there.
   const stderr = run.stderr ?? "";
@@ -394,19 +396,25 @@ class Relay {
   }
 }
 
-/** The value of agy's `--model` flag, in the `--model x` or `--model=x` form. */
-function modelArg(args: readonly string[]): string | undefined {
+/** The value of an agy flag such as `--model`, in the `--flag x` or `--flag=x` form. */
+function flagValue(args: readonly string[], flag: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === "--model") return args[i + 1];
-    if (arg.startsWith("--model=")) return arg.slice("--model=".length);
+    if (arg === flag) return args[i + 1];
+    if (arg.startsWith(`${flag}=`)) return arg.slice(flag.length + 1);
   }
   return undefined;
 }
 
-/** agy's print mode (`-p`, `--print`, `--prompt`) runs one turn and exits, so the pool can run it again elsewhere. */
-function isPrintMode(args: readonly string[]): boolean {
-  return args.some((arg) => /^(-p|--print|--prompt)(=|$)/.test(arg));
+/**
+ * agy's print mode (`-p`, `--print`, `--prompt`) runs one turn and exits, so the
+ * pool can hold its output and run it again elsewhere. A stream-json run talks
+ * to its caller line by line (one turn per stdin message, events as they come),
+ * so holding its output would stall the caller: it gets one run with agy's own stdio.
+ */
+function isRetryablePrint(args: readonly string[]): boolean {
+  if (!args.some((arg) => /^(-p|--print|--prompt)(=|$)/.test(arg))) return false;
+  return flagValue(args, "--input-format") !== "stream-json" && flagValue(args, "--output-format") !== "stream-json";
 }
 
 type Attempt = { readonly code: number; readonly stdout: string; readonly stderr: string };
@@ -452,9 +460,9 @@ function finish(stdout: string, code: number): void {
 async function runOnce(): Promise<void> {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const)
     process.on(signal, () => (current ? current.kill(signal) : process.exit(128 + os.constants.signals[signal])));
-  const model = modelArg(passArgs);
+  const model = flagValue(passArgs, "--model");
   const family = model === undefined ? null : modelFamily(model);
-  const print = isPrintMode(passArgs);
+  const print = isRetryablePrint(passArgs);
   const refused: AccountName[] = [];
   let exhaust: { readonly accounts: readonly AccountName[]; readonly resetMs: number } | undefined;
   let last: Attempt | null = null;
@@ -477,7 +485,9 @@ async function runOnce(): Promise<void> {
     const movable = launch.account !== null && !process.env.AGY_POOL_ACCOUNT && refused.length < MAX_SWAPS;
     if (result.code !== 0 && isQuotaError(text) && movable) {
       refused.unshift(launch.account!);
-      exhaust = { accounts: refused, resetMs: quotaResetMs(text) };
+      // Only a refusal with agy's "Resets in" marks the account for every run and thread;
+      // a short throttle (RESOURCE_EXHAUSTED without a reset) just moves this run.
+      exhaust = { accounts: refused, resetMs: /Resets in/i.test(text) ? quotaResetMs(text) : 0 };
       last = result;
       const label = family === null ? "" : `${familyLabel(family)} `;
       process.stderr.write(`agy-pool: account "${launch.account}" is out of ${label}quota; running again on another account.\n`);

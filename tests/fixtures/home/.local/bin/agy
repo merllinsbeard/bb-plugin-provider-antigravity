@@ -20,7 +20,12 @@ if [ "$1" = "acp" ]; then
 fi
 # A print-mode prompt (not the /usage probe): an account whose fake-print says
 # "quota" refuses it the way agy 1.5 does (exit 3, JSON error, "Resets in").
+# "throttle" is a short rate limit: RESOURCE_EXHAUSTED with no reset.
 if [ "$1" = "-p" ] && [ "$2" != "/usage" ]; then
+  if [ "$(cat "$state/fake-print" 2>/dev/null)" = "throttle" ]; then
+    echo '{"status":"ERROR","response":"","error":"429 RESOURCE_EXHAUSTED: too many requests, try again later."}'
+    exit 3
+  fi
   if [ "$(cat "$state/fake-print" 2>/dev/null)" = "quota" ]; then
     echo '{"status":"ERROR","response":"","error":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h0m0s."}'
     echo 'error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h0m0s.' >&2
