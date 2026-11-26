@@ -191,7 +191,9 @@ describe("quota hand-off", () => {
   it("hands off one failure once, also after the plugin reloads", async () => {
     const { harness, fail, spawns } = host({ errors });
     await Promise.all([fail({ id: "thr_src" }), fail({ id: "thr_src" })]);
-    await harness.lifecycle.reload((next) => registerQuotaHandoff(next));
+    await harness.lifecycle.reload((next) => {
+      registerQuotaHandoff(next);
+    });
     await fail({ id: "thr_src" });
     expect(spawns()).toHaveLength(1);
   });
