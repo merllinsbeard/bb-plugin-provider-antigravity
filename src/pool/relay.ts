@@ -358,6 +358,20 @@ class Relay {
     });
   }
 
+  /** Opens every session of this relay on the freshly attached agy and replays its settings. */
+  private async reopen(): Promise<{ readonly step: string; readonly error: unknown } | null> {
+    const ready = await this.request("initialize", this.initialize!.params);
+    if (ready.error) return { step: "initialize", error: ready.error };
+    for (const [sessionId, params] of this.sessions) {
+      this.loading.add(sessionId);
+      const loaded = await this.request("session/load", { ...params, sessionId });
+      this.loading.delete(sessionId);
+      if (loaded.error) return { step: "session/load", error: loaded.error };
+      for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
+    }
+    return null;
+  }
+
   /**
    * Moves the session to another account and sends the prompt there. `response`
    * is agy's answer to a refused prompt, or null when the prompt moves before
@@ -373,12 +387,15 @@ class Relay {
     // The account that refused; `attach` below replaces `this.account` with the one the swap moves to.
     const from = this.account;
     const outOf = prompt.family === null ? "quota" : `${familyLabel(prompt.family)} quota`;
+    // Set once agy runs on the target account; from then on the prompt can no longer go to the agy that had the session.
+    let moved = false;
     // `reason` says why the prompt could not move: the pool's answer, or the error the new account gave.
     const giveUp = (reason?: string) => {
       const alive = this.child.exitCode === null && this.child.signalCode === null;
       if (!alive) fail(-32603, "agy exited during account swap");
-      // agy refused the prompt for quota and no account can take it: fail the turn rather than pass the refusal off as a reply.
-      else if (response !== null)
+      // agy refused the prompt for quota and no account can take it, or the target could not open the session:
+      // fail the turn rather than pass a refusal off as a reply or send the prompt to an agy without the session.
+      else if (response !== null || moved)
         fail(-32000, reason ?? `agy-pool: account "${from}" is out of ${outOf} and the prompt could not move to another account.`);
       // The prompt has not been sent yet; agy itself decides whether the account still serves it.
       else this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
@@ -403,21 +420,33 @@ class Relay {
       );
       const previous = this.child;
       this.attach(next);
+      // A rebalance keeps the start-time agy until the target holds the session, so a failed move costs nothing.
+      if (rebalance) {
+        const target = this.child;
+        const stayed = (step: string, error: unknown) => {
+          const detail = (error as { message?: unknown }).message;
+          process.stderr.write(
+            `agy-pool: moving the new session to "${next.account}" failed at ${step} (${typeof detail === "string" ? detail : JSON.stringify(error)}); it stays on "${from}".\n`,
+          );
+          this.child = previous;
+          this.account = from;
+          stop(target);
+          return giveUp();
+        };
+        const failure = await this.reopen();
+        if (failure) return stayed(failure.step, failure.error);
+        stop(previous);
+        this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
+        return;
+      }
+      moved = true;
       stop(previous);
       const moveFailed = (step: string, error: unknown) => {
         const detail = (error as { message?: unknown }).message;
-        const why = rebalance ? `account "${from}" was a start-time pick` : `account "${from}" is out of ${outOf}`;
-        return `agy-pool: ${why}; moving the session to "${next.account}" failed at ${step}: ${typeof detail === "string" ? detail : JSON.stringify(error)}`;
+        return `agy-pool: account "${from}" is out of ${outOf}; moving the session to "${next.account}" failed at ${step}: ${typeof detail === "string" ? detail : JSON.stringify(error)}`;
       };
-      const ready = await this.request("initialize", this.initialize!.params);
-      if (ready.error) return giveUp(moveFailed("initialize", ready.error));
-      for (const [sessionId, params] of this.sessions) {
-        this.loading.add(sessionId);
-        const loaded = await this.request("session/load", { ...params, sessionId });
-        this.loading.delete(sessionId);
-        if (loaded.error) return giveUp(moveFailed("session/load", loaded.error));
-        for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
-      }
+      const failure = await this.reopen();
+      if (failure) return giveUp(moveFailed(failure.step, failure.error));
       const message = prompt.produced
         ? { ...prompt.message, params: { ...prompt.message.params, prompt: [{ type: "text", text: CONTINUE_PROMPT }] } }
         : prompt.message;

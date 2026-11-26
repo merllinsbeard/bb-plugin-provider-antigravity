@@ -96,6 +96,7 @@ export function account(name: AccountName, dir: string): Account {
 export function setDisabled(account: Account, disabled: boolean, reason: string | null): void {
   const file = path.join(account.dir, DISABLED_FILE);
   if (!disabled) return rmSync(file, { force: true });
+  mkdirSync(account.dir, { recursive: true, mode: 0o700 });
   writeFileSync(file, `${reason ?? ""}\n`, { mode: 0o600 });
   chmodSync(file, 0o600);
 }

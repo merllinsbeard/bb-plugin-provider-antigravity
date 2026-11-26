@@ -106,8 +106,13 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
       ok: false,
       message: `agy-pool: every signed-in Antigravity account is disabled (${authorized.map(({ name }) => name).join(", ")}). Run \`agy-pool enable <name>\`.`,
     };
-  const authenticated = signedIn.filter((account) => !outOf(account.name));
-  const live = liveThreadCounts(bindings, ports.isAlive);
+  // A tie keeps the thread where it is (`pickAccount` sorts stably), so a rebalance never restarts agy for nothing.
+  const authenticated = signedIn
+    .filter((account) => !outOf(account.name))
+    .sort((a, b) => Number(b.name === bound?.account) - Number(a.name === bound?.account));
+  // The thread being placed is not load on the account it may leave.
+  const others = new Map([...bindings].filter(([id]) => id !== threadId));
+  const live = liveThreadCounts(others, ports.isAlive);
   const candidate = async (account: UsableAccount, probe: boolean) => ({
     name: account.name,
     quota: probe ? await ports.readQuota(account) : null,

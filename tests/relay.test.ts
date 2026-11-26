@@ -512,6 +512,42 @@ describe("agy-pool ACP relay failover", () => {
       expect(acpLog().some((e) => e.account === "alt")).toBe(false);
     });
 
+    it("stays put on a tie instead of counting itself as load on its own account", async () => {
+      setupAccount(stateDir(), { gemini5h: 1, threeP: 1 });
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 1, threeP: 1 });
+      const first = startRelay("thr_tie_1");
+      expect(await ask(first, await openSession(first, "gemini-4-neon-high"), "One")).toBe("ANSWER(default):One");
+
+      // `thr_tie_1` is live on `default`, so the second thread starts on `alt` and must keep it.
+      const second = startRelay("thr_tie_2");
+      expect(await ask(second, await openSession(second, "gemini-4-neon-high"), "Two")).toBe("ANSWER(alt):Two");
+      expect(bound("thr_tie_1")).toBe("default");
+      expect(bound("thr_tie_2")).toBe("alt");
+      expect(calls("default", "initialize")).toHaveLength(1);
+      expect(calls("alt", "initialize")).toHaveLength(1);
+    });
+
+    it("keeps the session on the start-time account when the better account cannot open it", async () => {
+      setupAccount(stateDir(), { gemini5h: 1, threeP: 1 });
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 1, threeP: 0, acpMode: "load-error" });
+      const r = startRelay("thr_rebalance_fails");
+      expect(await ask(r, await openSession(r, "gemini-4-neon-high"), "Hi")).toBe("ANSWER(default):Hi");
+      expect(calls("alt", "session/load")).toHaveLength(1);
+      expect(calls("alt", "session/prompt")).toHaveLength(0);
+      expect(r.getStderr()).toContain('moving the new session to "alt" failed at session/load (conversation store is locked); it stays on "default"');
+    });
+
+    it("fails the turn with the target's error when a prompt moving off an exhausted account cannot open there", async () => {
+      setupAccount(stateDir(), { gemini5h: 1, threeP: 1 });
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.5, threeP: 1, acpMode: "load-error" });
+      markExhausted(statePath("exhausted.json"), parseAccountName("default")!, "gemini", new Date(Date.now() + 3_600_000));
+      const r = startRelay("thr_move_fails");
+      expect(await ask(r, await openSession(r, "gemini-4-neon-high"), "Hi")).toBe(
+        'ERROR:agy-pool: account "default" is out of Gemini quota; moving the session to "alt" failed at session/load: conversation store is locked',
+      );
+      expect(calls("alt", "session/prompt")).toHaveLength(0);
+    });
+
     it("never moves a thread pinned with AGY_POOL_ACCOUNT", async () => {
       pool();
       const r = startRelay("thr_pinned", { AGY_POOL_ACCOUNT: "default" });
