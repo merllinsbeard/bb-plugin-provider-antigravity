@@ -5,6 +5,14 @@
 // the failure and applies its own fallback, and two actors relaunching the same
 // work is what this must not cause. Plugin-spawned threads stay out because the
 // plugin that started them owns their retries.
+//
+// One exhaustion episode gets one successor. Until the source thread completes a
+// turn again, each later turn of it that fails on the same exhaustion (bb's
+// child notices, the owner's or an agent's message) is forwarded to that
+// successor, queued behind its running turn, instead of starting another one;
+// on 26.11 three successors took the same work within three minutes. A turn the
+// successor itself asked for is dropped. An archived successor, a completed turn
+// since the hand-off, or a failed send starts a new successor.
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { ANTIGRAVITY } from "./identity.ts";
@@ -36,7 +44,10 @@ export function isOwnerThread(thread: Pick<ThreadResponse, "providerId" | "paren
   );
 }
 
-/** The plugin-metadata key on the failed thread: which failure was handed off, and to which thread. */
+/**
+ * The plugin-metadata key on the failed thread: the last exhaustion failure handled, and the successor of its episode.
+ * That failure is also where "has the thread completed a turn since" is read from.
+ */
 const RECORD_KEY = "quotaHandoff";
 
 type HandoffRecord = { readonly failureEventId: string; readonly successorThreadId: string | null };
@@ -50,29 +61,93 @@ function readRecord(metadata: Record<string, unknown>): HandoffRecord | null {
     : null;
 }
 
-function continuationInput(thread: ThreadResponse, exhaustion: PoolExhaustion) {
+/** A text input that opens with `lead` followed by a mention of `thread`. */
+function mentionText(thread: ThreadResponse, lead: string, rest: string) {
   const mention = `@thread:${thread.id}`;
-  const lead = "Continue from ";
+  const label = thread.title ?? thread.titleFallback ?? thread.id;
+  return {
+    type: "text" as const,
+    text: `${lead}${mention}${rest}`,
+    mentions: [
+      {
+        start: lead.length,
+        end: lead.length + mention.length,
+        resource: { kind: "thread" as const, projectId: thread.projectId, threadId: thread.id, label },
+      },
+    ],
+  };
+}
+
+function continuationInput(thread: ThreadResponse, exhaustion: PoolExhaustion) {
   const quota = exhaustion.family === null ? "quota" : `${exhaustion.family} quota`;
   const reset = exhaustion.resetsAt === null ? "" : ` until ${exhaustion.resetsAt}`;
-  const text =
-    `${lead}${mention}\n\n` +
-    `That thread stopped because every Antigravity account is out of ${quota}${reset}; ` +
-    "finish its last task here without redoing work it already finished.";
-  const label = thread.title ?? thread.titleFallback ?? thread.id;
   return [
-    {
-      type: "text" as const,
-      text,
-      mentions: [
-        {
-          start: lead.length,
-          end: lead.length + mention.length,
-          resource: { kind: "thread" as const, projectId: thread.projectId, threadId: thread.id, label },
-        },
-      ],
-    },
+    mentionText(
+      thread,
+      "Continue from ",
+      "\n\n" +
+        `That thread stopped because every Antigravity account is out of ${quota}${reset}; ` +
+        "finish its last task here without redoing work it already finished.",
+    ),
   ];
+}
+
+type SendInput = Parameters<BbPluginApi["sdk"]["threads"]["send"]>[0]["input"];
+
+/**
+ * Settles a later exhaustion failure inside the episode `record` names, and answers whether it did. It did when the
+ * source has completed no turn since the hand-off and the successor is live: the failed turn's request goes to the
+ * successor, or is dropped when the successor sent it. Anything else, a failed send included, leaves it to a new
+ * successor.
+ */
+async function forwardToSuccessor(
+  bb: BbPluginApi,
+  thread: ThreadResponse,
+  record: HandoffRecord,
+  failure: { readonly id: string; readonly seq: number },
+): Promise<boolean> {
+  const { successorThreadId } = record;
+  if (successorThreadId === null) return false;
+  try {
+    // Every turn since the recorded failure failed, or a new successor would have been recorded, so the walk back to it
+    // is a few rows. A recorded failure past the window counts as an old episode.
+    const recent = await bb.sdk.threads.events.list({
+      threadId: thread.id,
+      order: "desc",
+      limit: "100",
+      types: ["turn/completed", "provider/error", "system/error"],
+    });
+    const handled = recent.findIndex((event) => event.id === record.failureEventId);
+    const completed = (event: (typeof recent)[number]) =>
+      event.type === "turn/completed" && (event.data as { status?: unknown }).status === "completed";
+    if (handled === -1 || recent.slice(0, handled).some(completed)) return false;
+    if ((await bb.sdk.threads.get({ threadId: successorThreadId })).archivedAt !== null) return false;
+    const [request] = await bb.sdk.threads.events.list({
+      threadId: thread.id,
+      beforeSeq: String(failure.seq),
+      order: "desc",
+      limit: "1",
+      types: ["client/turn/requested"],
+    });
+    const { input, senderThreadId } = (request?.data ?? {}) as { input?: SendInput; senderThreadId?: string | null };
+    // Claim the failure before sending, as before spawning: a crash in between loses one message rather than doubling it.
+    await bb.sdk.threads.updatePluginMetadata({ threadId: thread.id, set: { [RECORD_KEY]: { ...record, failureEventId: failure.id } } });
+    if (senderThreadId === successorThreadId) return true;
+    if (!Array.isArray(input)) return false;
+    await bb.sdk.threads.send({
+      threadId: successorThreadId,
+      mode: "queue-if-active",
+      input: [
+        mentionText(thread, "Forwarded from ", " because that thread is out of Antigravity quota; the message it could not take follows."),
+        ...input,
+      ],
+    });
+    bb.log.info(`Thread ${thread.id} is still out of Antigravity quota; forwarded its failed turn to ${successorThreadId}.`);
+    return true;
+  } catch (error) {
+    bb.log.warn(`Could not forward the failed turn of ${thread.id} to ${successorThreadId}: ${(error as Error).message}`);
+    return false;
+  }
 }
 
 /**
@@ -136,8 +211,9 @@ export function registerQuotaHandoff(bb: BbPluginApi) {
       const data = failure.data as { message?: unknown; detail?: unknown };
       const exhaustion = parsePoolExhaustion([data.message, data.detail].filter((part) => typeof part === "string").join("\n"));
       if (exhaustion === null) return;
-      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: thread.id });
-      if (readRecord(metadata)?.failureEventId === failure.id) return;
+      const record = readRecord(await bb.sdk.threads.getPluginMetadata({ threadId: thread.id }));
+      if (record?.failureEventId === failure.id) return;
+      if (record !== null && (await forwardToSuccessor(bb, thread, record, failure))) return;
       // Claim the failure before spawning: a crash between the two loses one hand-off rather than doubling it.
       await bb.sdk.threads.updatePluginMetadata({
         threadId: thread.id,
