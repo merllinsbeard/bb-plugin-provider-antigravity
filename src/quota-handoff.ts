@@ -101,7 +101,8 @@ async function announce(bb: BbPluginApi, thread: ThreadResponse, exhaustion: Poo
   }
 }
 
-export function registerQuotaHandoff(bb: BbPluginApi): void {
+/** Returns its settings, so the retry listener reads the one `quotaHandoff` switch and leaves hand-off cases to it. */
+export function registerQuotaHandoff(bb: BbPluginApi) {
   const settings = bb.settings.define({
     quotaHandoff: {
       type: "boolean",
@@ -171,4 +172,5 @@ export function registerQuotaHandoff(bb: BbPluginApi): void {
       inFlight.delete(thread.id);
     }
   });
+  return settings;
 }
