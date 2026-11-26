@@ -1,12 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AccountName } from "../src/pool/account.ts";
+import {
+  HOST_MACHINE_ID,
+  MACHINE_ID_FILE,
+  accountCommand,
+  ensureMachineId,
+  poolPaths,
+  type AccountName,
+  type UsableAccount,
+} from "../src/pool/account.ts";
 import { clearExhausted, isMarkStale } from "../src/pool/exhaustion.ts";
 import { modelFamily } from "../src/pool/family.ts";
 import { pickAccount } from "../src/pool/pick.ts";
@@ -587,7 +595,7 @@ describe("agy-pool launcher", () => {
     account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
     const run = await launch({ BB_THREAD_ID: "thr_five", AGY_FAKE_EXIT: "7" }, ["acp", "--dangerously-skip-permissions"], "hello over stdio\n");
     expect(run.code).toBe(7);
-    expect(run.stdout).toMatch(/account=alt pid=\d+ args=acp --dangerously-skip-permissions\nhello over stdio\n$/);
+    expect(run.stdout).toMatch(/account=alt pid=\d+ machine=[0-9a-f]+ args=acp --dangerously-skip-permissions\nhello over stdio\n$/);
   });
 
   it("binds an ACP thread even when the caller's environment carries the one-shot flag", async () => {
@@ -680,6 +688,55 @@ describe("agy-pool launcher", () => {
     expect(listed[1].quota.map((w: { label: string }) => w.label)).toContain("5h · Gemini");
     expect(listed[2].quota).toBeNull();
   });
+  it("probes every account at once, so the list takes about one probe's time and keeps account order", async () => {
+    for (const name of ["a1", "a2", "a3"]) account(accountDir(name), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: name });
+    const delaySeconds = 2;
+    const started = Date.now();
+    const run = await launch({ AGY_FAKE_DELAY: String(delaySeconds) }, ["list"]);
+    const elapsed = Date.now() - started;
+    expect(run.code).toBe(0);
+    const listed = JSON.parse(run.stdout).accounts;
+    expect(listed.map((a: { name: string }) => a.name)).toEqual(["default", "a1", "a2", "a3"]);
+    for (const entry of listed) expect(entry.quota).not.toBeNull();
+    // Four probes one after another would take at least 8 s.
+    expect(elapsed).toBeLessThan(2.5 * delaySeconds * 1000);
+  });
+
+  describe("machine id isolation", () => {
+    const hostId = () => readFileSync(HOST_MACHINE_ID, "utf8").trim();
+    const machineOf = (stdout: string) => /machine=(\S*)/.exec(stdout)?.[1];
+
+    it("runs an added account with its own /etc/machine-id and the default account with the host's", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      const alt = await launch({ AGY_POOL_ACCOUNT: "alt" });
+      expect(accountOf(alt.stdout)).toBe("alt");
+      const own = readFileSync(path.join(accountDir("alt"), MACHINE_ID_FILE), "utf8");
+      expect(own).toMatch(/^[0-9a-f]{32}\n$/);
+      expect(machineOf(alt.stdout)).toBe(own.trim());
+      expect(machineOf(alt.stdout)).not.toBe(hostId());
+
+      const again = await launch({ AGY_POOL_ACCOUNT: "alt" });
+      expect(machineOf(again.stdout)).toBe(own.trim());
+
+      const rewrite = await launch({ AGY_POOL_ACCOUNT: "alt", AGY_FAKE_MODE: "rewrite-id" });
+      expect(rewrite.stdout).toContain("rewrite refused");
+      expect(readFileSync(path.join(accountDir("alt"), MACHINE_ID_FILE), "utf8")).toBe(own);
+
+      const host = await launch({ AGY_POOL_ACCOUNT: "default" });
+      expect(machineOf(host.stdout)).toBe(hostId());
+      expect(existsSync(path.join(stateDir(), MACHINE_ID_FILE))).toBe(false);
+    });
+
+    it("gives each added account a different id on sync", async () => {
+      account(accountDir("acc2"), { usage: { gemini5h: 1, geminiWeekly: 1 } });
+      account(accountDir("acc3"), { usage: { gemini5h: 1, geminiWeekly: 1 } });
+      expect((await launch({}, ["sync"])).code).toBe(0);
+      const ids = ["acc2", "acc3"].map((name) => readFileSync(path.join(accountDir(name), MACHINE_ID_FILE), "utf8"));
+      expect(ids[0]).not.toBe(ids[1]);
+      for (const name of ["acc2", "acc3"]) expect(statSync(path.join(accountDir(name), MACHINE_ID_FILE)).mode & 0o777).toBe(0o600);
+    });
+  });
+
   const PROXY = "http://pool-user:s3cret@127.0.0.1:3128";
   const NO_PROXY = "localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net";
   const proxied = (url: string) => `|account=alt|https_proxy=${url}|http_proxy=${url}|no_proxy=${NO_PROXY}`;
@@ -689,7 +746,7 @@ describe("agy-pool launcher", () => {
     account(accountDir("alt"), { usage: { gemini5h: 0.9, geminiWeekly: 1 }, label: "alt", proxy: PROXY });
     const run = await launch({ BB_THREAD_ID: "thr_proxy" });
     expect(run.code).toBe(0);
-    expect(run.stdout).toMatch(new RegExp(`^account=alt pid=\\d+ args=acp\\|account=alt\\|https_proxy=${PROXY}\\|`));
+    expect(run.stdout).toMatch(new RegExp(`^account=alt pid=\\d+ machine=[0-9a-f]+ args=acp\\|account=alt\\|https_proxy=${PROXY}\\|`));
     expect(run.stdout).toContain(proxied(PROXY));
     expect(usageCalls().sort()).toEqual([
       "-p /usage --output-format json --print-timeout 15s|marker=",
@@ -845,5 +902,90 @@ describe("agy-pool launcher", () => {
       expect(accountOf(run.stdout)).toBe("alt");
       expect(readFileSync(path.join(accountDir("alt"), "settings.json"), "utf8")).toBe(updated);
     });
+  });
+});
+
+describe("ensureMachineId", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "agy-machine-id-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("writes 32 lowercase hex digits and a newline, readable only by the owner", () => {
+    const file = ensureMachineId(path.join(dir, "acc"))!;
+    expect(file).toBe(path.join(dir, "acc", MACHINE_ID_FILE));
+    expect(readFileSync(file, "utf8")).toMatch(/^[0-9a-f]{32}\n$/);
+    expect(statSync(file).size).toBe(33);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("keeps an existing valid id, with or without its newline", () => {
+    const file = ensureMachineId(dir)!;
+    const first = readFileSync(file, "utf8");
+    ensureMachineId(dir);
+    expect(readFileSync(file, "utf8")).toBe(first);
+    writeFileSync(file, "0123456789abcdef0123456789abcdef");
+    ensureMachineId(dir);
+    expect(readFileSync(file, "utf8")).toBe("0123456789abcdef0123456789abcdef");
+  });
+
+  it("replaces an id that is a symlink, even to a valid id such as the host's", () => {
+    const file = path.join(dir, MACHINE_ID_FILE);
+    symlinkSync(HOST_MACHINE_ID, file);
+    ensureMachineId(dir);
+    expect(lstatSync(file).isSymbolicLink()).toBe(false);
+    expect(readFileSync(file, "utf8")).not.toBe(readFileSync(HOST_MACHINE_ID, "utf8"));
+    expect(readdirSync(dir)).toEqual([MACHINE_ID_FILE]);
+  });
+
+  it("replaces an invalid id", () => {
+    const file = path.join(dir, MACHINE_ID_FILE);
+    for (const bad of ["", "not-an-id\n", "0123456789ABCDEF0123456789ABCDEF\n", "0123456789abcdef\n"]) {
+      writeFileSync(file, bad);
+      ensureMachineId(dir);
+      expect(readFileSync(file, "utf8")).toMatch(/^[0-9a-f]{32}\n$/);
+    }
+  });
+});
+
+describe("accountCommand machine id", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "agy-command-"));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const usable = (accountName: string, dir: string): UsableAccount => ({
+    name: accountName as AccountName,
+    dir,
+    disabled: false,
+    disabledReason: null,
+    egress: { kind: "direct" },
+  });
+
+  it("binds an added account's id over /etc/machine-id read-only, and only when the account has one", () => {
+    const paths = poolPaths({ AGY_POOL_ACCOUNTS_DIR: path.join(root, "accounts") }, path.join(root, "home"));
+    const dir = path.join(root, "accounts", "alt");
+    mkdirSync(dir, { recursive: true });
+    const before = accountCommand(paths, usable("alt", dir), "agy", ["acp"]).args;
+    expect(before).not.toContain(HOST_MACHINE_ID);
+    expect(existsSync(path.join(dir, MACHINE_ID_FILE))).toBe(false);
+
+    const file = ensureMachineId(dir)!;
+    const args = accountCommand(paths, usable("alt", dir), "agy", ["acp"]).args;
+    const at = args.indexOf("--ro-bind");
+    expect(args.slice(at, at + 3)).toEqual(["--ro-bind", file, HOST_MACHINE_ID]);
+    // Read-only at its own path inside the sandbox too, so agy cannot rewrite it.
+    expect(args.join(" ")).toContain(`--ro-bind ${file} ${path.join(paths.agyStateDir, MACHINE_ID_FILE)}`);
+    expect(args.indexOf("agy")).toBeGreaterThan(at);
+  });
+
+  it("leaves the default account unsandboxed", () => {
+    const paths = poolPaths({}, path.join(root, "home"));
+    ensureMachineId(paths.agyStateDir);
+    const command = accountCommand(paths, usable("default", paths.agyStateDir), "agy", ["acp"]);
+    expect(command.command).toBe("agy");
+    expect(command.args).toEqual(["acp"]);
   });
 });

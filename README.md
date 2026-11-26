@@ -64,11 +64,14 @@ Supported proxy schemes: `http://`, `https://`, and `socks5://` (credentials all
 ```sh
 ./bin/agy-pool list
 ./bin/agy-pool sync
+./bin/agy-pool stats --since 7d        # token and prompt-cache usage; add --json for JSON
 ./bin/agy-pool disable acc2 "reason"   # take an account out of automatic picking
 ./bin/agy-pool enable acc2
 ```
 
-`list` prints JSON with every account's sign-in state, `disabled` flag, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows. `sync` propagates `settings.json` from the default account to every added pool account and migrates any unshared conversation folders without touching auth tokens or proxy files.
+`list` prints JSON with every account's sign-in state, `disabled` flag, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows; it probes all accounts at once. `sync` propagates `settings.json` from the default account to every added pool account, gives each added account its own machine id, and migrates any unshared conversation folders without touching auth tokens or proxy files.
+
+`stats [--since 24h|7d|30d|all] [--json]` (default `24h`) reads agy's own conversation databases read-only, with no proxy in the request path, and reports model calls, input, cache-read, output and thinking tokens, the prompt-cache hit rate, average context, TTFT, generation speed and downgraded calls, overall and per model. It prints numbers and model names only, never conversation text.
 
 ### 4. One-shot runs (`agy -p`)
 
