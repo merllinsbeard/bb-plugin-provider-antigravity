@@ -23,9 +23,13 @@ export type QuotaWindow = {
   readonly resetsAt: string | null;
 };
 
+/** Subscription tier from loadCodeAssist; only the direct quota API reports it. */
+export type Tier = "ULTRA" | "ENTERPRISE" | "PRO" | "FREE";
+
 export type QuotaReading = {
   readonly accountEmail: string | null;
   readonly planLabel: string | null;
+  readonly tier?: Tier | null;
   readonly windows: readonly QuotaWindow[];
 };
 

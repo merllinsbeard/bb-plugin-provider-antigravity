@@ -1,3 +1,4 @@
+import { readDirectQuota } from "../usage/direct-api.ts";
 import { createPrintRunner, probeQuota } from "../usage/probe.ts";
 import type { ProbeOutcome } from "../usage/types.ts";
 import { accountCommand, isAuthenticated, isUsable, type Account, type PoolPaths } from "./account.ts";
@@ -12,6 +13,7 @@ export function probeAccount(
   return probeQuota({
     locateBinary,
     hasAuthToken: () => isAuthenticated(account),
+    readDirect: () => readDirectQuota({ accountDir: account.dir, route: account.egress }),
     runPrint: createPrintRunner({ command: (binary, args) => accountCommand(paths, account, binary, args) }),
   });
 }

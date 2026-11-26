@@ -5,8 +5,9 @@ import type { ProbeOutcome } from "./types.ts";
 
 export type AccountUsage = z.input<typeof usageSchema>;
 
-function badge(account: Account): string {
-  return `${account.name} · ${account.egress.kind === "proxy" ? "proxy" : "direct"}`;
+function badge(account: Account, tier: string | null | undefined): string {
+  const route = account.egress.kind === "proxy" ? "proxy" : "direct";
+  return [account.name, tier, route].filter(Boolean).join(" · ");
 }
 
 function failure(account: Account, outcome: Extract<ProbeOutcome, { ok: false }>): AccountUsage {
@@ -30,7 +31,7 @@ export function accountUsage(account: Account, outcome: ProbeOutcome): AccountUs
   return {
     status: "ok",
     accountEmail: readAccountEmail(account) ?? account.name,
-    planLabel: badge(account),
+    planLabel: badge(account, outcome.reading.tier),
     windows: outcome.reading.windows.map((window) => ({
       id: window.id,
       kind: window.kind,
