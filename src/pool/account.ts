@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
@@ -19,6 +19,8 @@ export const DISABLED_FILE = "agy-pool-disabled";
  */
 export const MACHINE_ID_FILE = "agy-pool-machine-id";
 export const HOST_MACHINE_ID = "/etc/machine-id";
+/** Host files that may hold the machine id; a symlink among them already follows `/etc/machine-id`. */
+const HOST_MACHINE_ID_FILES = [HOST_MACHINE_ID, "/var/lib/dbus/machine-id"] as const;
 const MACHINE_ID = /^[0-9a-f]{32}\n?$/;
 
 type AccountBase = {
@@ -139,20 +141,40 @@ export const SHARED_DIRS = ["conversations", "brain", "annotations"] as const;
 
 /**
  * Gives an account folder its own machine id (32 lowercase hex and a newline,
- * mode 0600) unless it already holds a valid one. Idempotent; written through
- * a temp file and a rename so a crash never leaves a half-written id.
+ * mode 0600) unless it already holds a valid one in a regular file. Idempotent;
+ * written through a temp file so a crash never leaves a half-written id, and
+ * two first starts agree on one id. Null when the folder cannot take the file;
+ * the account then runs with the host's id.
  */
-export function ensureMachineId(accountDir: string): string {
+export function ensureMachineId(accountDir: string): string | null {
   const file = path.join(accountDir, MACHINE_ID_FILE);
-  try {
-    if (MACHINE_ID.test(readFileSync(file, "utf8"))) return file;
-  } catch {}
+  if (isRegularFile(file) && MACHINE_ID.test(readFileSync(file, "utf8"))) return file;
   mkdirSync(accountDir, { recursive: true, mode: 0o700 });
   const tmpFile = path.join(accountDir, `.${MACHINE_ID_FILE}.${process.pid}.${Date.now()}.tmp`);
-  writeFileSync(tmpFile, `${randomBytes(16).toString("hex")}\n`, { mode: 0o600 });
-  chmodSync(tmpFile, 0o600);
-  renameSync(tmpFile, file);
-  return file;
+  try {
+    writeFileSync(tmpFile, `${randomBytes(16).toString("hex")}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(tmpFile, 0o600);
+    try {
+      // Creating with link() fails when another start created the id first; that id wins.
+      linkSync(tmpFile, file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!(isRegularFile(file) && MACHINE_ID.test(readFileSync(file, "utf8")))) renameSync(tmpFile, file);
+    }
+    return file;
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmpFile, { force: true });
+  }
+}
+
+function isRegularFile(file: string): boolean {
+  try {
+    return lstatSync(file).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function accountCommand(
@@ -165,7 +187,14 @@ export function accountCommand(
   const env = routeEnv(account.egress);
   if (account.name === DEFAULT_ACCOUNT) return { command: agy, args, env };
   const machineId = path.join(account.dir, MACHINE_ID_FILE);
-  const identity = existsSync(machineId) && existsSync(HOST_MACHINE_ID) ? ["--ro-bind", machineId, HOST_MACHINE_ID] : [];
+  const identity = isRegularFile(machineId)
+    ? [
+        ...HOST_MACHINE_ID_FILES.flatMap((target) => (isRegularFile(target) ? ["--ro-bind", machineId, target] : [])),
+        "--ro-bind",
+        machineId,
+        path.join(paths.agyStateDir, MACHINE_ID_FILE),
+      ]
+    : [];
   const shared = options?.shareConversations
     ? SHARED_DIRS.flatMap((dir) => ["--bind", path.join(paths.agyStateDir, dir), path.join(paths.agyStateDir, dir)])
     : [];

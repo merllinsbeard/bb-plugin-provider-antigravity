@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -718,6 +718,10 @@ describe("agy-pool launcher", () => {
       const again = await launch({ AGY_POOL_ACCOUNT: "alt" });
       expect(machineOf(again.stdout)).toBe(own.trim());
 
+      const rewrite = await launch({ AGY_POOL_ACCOUNT: "alt", AGY_FAKE_MODE: "rewrite-id" });
+      expect(rewrite.stdout).toContain("rewrite refused");
+      expect(readFileSync(path.join(accountDir("alt"), MACHINE_ID_FILE), "utf8")).toBe(own);
+
       const host = await launch({ AGY_POOL_ACCOUNT: "default" });
       expect(machineOf(host.stdout)).toBe(hostId());
       expect(existsSync(path.join(stateDir(), MACHINE_ID_FILE))).toBe(false);
@@ -909,7 +913,7 @@ describe("ensureMachineId", () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("writes 32 lowercase hex digits and a newline, readable only by the owner", () => {
-    const file = ensureMachineId(path.join(dir, "acc"));
+    const file = ensureMachineId(path.join(dir, "acc"))!;
     expect(file).toBe(path.join(dir, "acc", MACHINE_ID_FILE));
     expect(readFileSync(file, "utf8")).toMatch(/^[0-9a-f]{32}\n$/);
     expect(statSync(file).size).toBe(33);
@@ -917,13 +921,22 @@ describe("ensureMachineId", () => {
   });
 
   it("keeps an existing valid id, with or without its newline", () => {
-    const file = ensureMachineId(dir);
+    const file = ensureMachineId(dir)!;
     const first = readFileSync(file, "utf8");
     ensureMachineId(dir);
     expect(readFileSync(file, "utf8")).toBe(first);
     writeFileSync(file, "0123456789abcdef0123456789abcdef");
     ensureMachineId(dir);
     expect(readFileSync(file, "utf8")).toBe("0123456789abcdef0123456789abcdef");
+  });
+
+  it("replaces an id that is a symlink, even to a valid id such as the host's", () => {
+    const file = path.join(dir, MACHINE_ID_FILE);
+    symlinkSync(HOST_MACHINE_ID, file);
+    ensureMachineId(dir);
+    expect(lstatSync(file).isSymbolicLink()).toBe(false);
+    expect(readFileSync(file, "utf8")).not.toBe(readFileSync(HOST_MACHINE_ID, "utf8"));
+    expect(readdirSync(dir)).toEqual([MACHINE_ID_FILE]);
   });
 
   it("replaces an invalid id", () => {
@@ -959,10 +972,12 @@ describe("accountCommand machine id", () => {
     expect(before).not.toContain(HOST_MACHINE_ID);
     expect(existsSync(path.join(dir, MACHINE_ID_FILE))).toBe(false);
 
-    const file = ensureMachineId(dir);
+    const file = ensureMachineId(dir)!;
     const args = accountCommand(paths, usable("alt", dir), "agy", ["acp"]).args;
     const at = args.indexOf("--ro-bind");
     expect(args.slice(at, at + 3)).toEqual(["--ro-bind", file, HOST_MACHINE_ID]);
+    // Read-only at its own path inside the sandbox too, so agy cannot rewrite it.
+    expect(args.join(" ")).toContain(`--ro-bind ${file} ${path.join(paths.agyStateDir, MACHINE_ID_FILE)}`);
     expect(args.indexOf("agy")).toBeGreaterThan(at);
   });
 

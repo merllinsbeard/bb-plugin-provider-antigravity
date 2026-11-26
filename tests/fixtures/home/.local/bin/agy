@@ -11,6 +11,9 @@ if [ "$1" = "--version" ]; then
 fi
 if [ "$1" = "acp" ]; then
   printf 'account=%s pid=%s machine=%s args=%s%s\n' "$name" "$$" "$(cat /etc/machine-id 2>/dev/null)" "$*" "$egress"
+  if [ "$AGY_FAKE_MODE" = "rewrite-id" ]; then
+    { echo 00000000000000000000000000000000 > "$state/agy-pool-machine-id"; } 2>/dev/null || echo "rewrite refused"
+  fi
   if [ "$AGY_FAKE_MODE" = "serve" ]; then
     trap 'echo "term $(cat "$state/fake-name" 2>/dev/null || echo default)" >> "$AGY_FAKE_LOG"; exit 0' TERM
     while :; do sleep 0.1; done

@@ -221,6 +221,22 @@ describe("agy-pool stats", () => {
     for (const data of bad.slice(0, 3)) expect(parseTurn(data)).toBeNull();
   });
 
+  it("refuses conversations whose tables SQLite would have to compute, instead of hanging", () => {
+    const view = new DatabaseSync(path.join(dir, "view.db"));
+    view.exec(SCHEMA[0]!);
+    view.exec("CREATE VIEW gen_metadata AS WITH RECURSIVE n(idx, data) AS (SELECT 0, x'00' UNION ALL SELECT idx + 1, data FROM n) SELECT idx, data FROM n");
+    view.close();
+    const generated = new DatabaseSync(path.join(dir, "generated.db"));
+    generated.exec(SCHEMA[0]!);
+    generated.exec("CREATE TABLE gen_metadata (idx integer PRIMARY KEY, n integer, data blob GENERATED ALWAYS AS (zeroblob(n)) VIRTUAL)");
+    generated.exec("INSERT INTO gen_metadata (idx, n) VALUES (0, 900000)");
+    generated.close();
+
+    const report = scanConversations(dir, "24h", now);
+    expect(report.conversationsSkipped).toBe(2);
+    expect(report.turns).toBe(0);
+  });
+
   it("reports an empty store and a missing folder as zero usage", () => {
     expect(scanConversations(path.join(root, "absent"), "7d", now)).toMatchObject({ conversationsScanned: 0, turns: 0, cacheHitRate: null, byModel: [] });
   });

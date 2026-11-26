@@ -37,6 +37,9 @@ const STEP_METADATA = { createdAt: 1 } as const;
 const MAX_BLOB_BYTES = 1024 * 1024;
 const MAX_NAME_CHARS = 80;
 const BUSY_TIMEOUT_MS = 200;
+/** Far above any real conversation (the largest live one holds a few hundred calls). */
+const MAX_ROWS = 100_000;
+const MAX_READ_BYTES = 256 * 1024 * 1024;
 
 type FieldValue = number | Uint8Array;
 type Fields = ReadonlyArray<readonly [field: number, value: FieldValue]>;
@@ -338,11 +341,13 @@ export function aggregate(
 }
 
 /**
- * Opens a conversation without ever writing to it. `mode=ro` is only safe
+ * Opens a conversation without writing to it. `mode=ro` is only safe
  * when agy already holds the database open: on an idle WAL database SQLite
  * would create `-wal` and `-shm` beside it even read-only, so those are read
  * `immutable=1` (no locks, no sidecars). A live database needs `mode=ro` to
- * see turns still sitting in its WAL; if that fails it is read immutable.
+ * see turns still sitting in its WAL (as any SQLite reader, it updates
+ * read marks in the existing `-shm`; the database and `-wal` stay untouched);
+ * if that fails it is read immutable.
  */
 function openReadOnly(file: string): DatabaseSync {
   const uri = pathToFileURL(file).href;
@@ -355,16 +360,37 @@ function openReadOnly(file: string): DatabaseSync {
   return open("immutable=1");
 }
 
+/**
+ * True when `gen_metadata` and `steps` are ordinary tables with stored
+ * columns. A view or a generated column would make SQLite compute rows,
+ * which a crafted file can turn into an endless query.
+ */
+function hasPlainTables(db: DatabaseSync): boolean {
+  const schema = db.prepare("SELECT type, sql FROM sqlite_master WHERE name = ?");
+  for (const table of ["gen_metadata", "steps"]) {
+    const entry = schema.get(table);
+    if (entry?.type !== "table" || typeof entry.sql !== "string" || !/^CREATE TABLE/i.test(entry.sql)) return false;
+    if (db.prepare(`PRAGMA table_xinfo(${table})`).all().some((column) => column.hidden !== 0)) return false;
+  }
+  return true;
+}
+
 /** Every readable model call in one conversation, or null when the file is not a readable conversation. */
 export function readConversation(file: string, fallbackAt: Date): Turn[] | null {
   let db: DatabaseSync | null = null;
   try {
     db = openReadOnly(file);
+    db.exec("PRAGMA trusted_schema = OFF");
+    if (!hasPlainTables(db)) return null;
     const stepMetadata = db.prepare("SELECT metadata FROM steps WHERE idx = ? AND length(metadata) <= ?");
-    const rows = db.prepare("SELECT data FROM gen_metadata WHERE length(data) <= ? ORDER BY idx").all(MAX_BLOB_BYTES);
+    const rows = db.prepare("SELECT data FROM gen_metadata WHERE length(data) <= ?").iterate(MAX_BLOB_BYTES);
     const turns: Turn[] = [];
+    let seen = 0;
+    let bytes = 0;
     for (const row of rows) {
+      if (++seen > MAX_ROWS || bytes > MAX_READ_BYTES) break;
       if (!(row.data instanceof Uint8Array)) continue;
+      bytes += row.data.length;
       const parsed = parseTurn(row.data);
       if (parsed === null) continue;
       const { stepIndex, ...turn } = parsed;
