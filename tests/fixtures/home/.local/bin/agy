@@ -16,7 +16,12 @@ if [ "$1" = "acp" ]; then
   fi
   if [ "$AGY_FAKE_MODE" = "serve" ]; then
     trap 'echo "term $(cat "$state/fake-name" 2>/dev/null || echo default)" >> "$AGY_FAKE_LOG"; exit 0' TERM
-    while :; do sleep 0.1; done
+    # Like agy, stop when the client closes stdin: the relay runs bwrap in its own
+    # process group, so a killed relay reaches this process only through that EOF.
+    exec 3<&0
+    cat <&3 >/dev/null &
+    wait $!
+    exit 0
   fi
   cat
   exit "${AGY_FAKE_EXIT:-0}"

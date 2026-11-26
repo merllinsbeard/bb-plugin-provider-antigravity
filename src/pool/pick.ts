@@ -24,6 +24,10 @@ const WEEKLY_BAND = 0.2;
 export const EXPIRING_SOON_MS = 48 * 3600 * 1000;
 /** Below this much weekly room an expiring window is not worth chasing. */
 export const EXPIRING_MIN_WEEKLY = 0.05;
+/** This many live threads on one account burn its 5h window together, so the next thread goes elsewhere. */
+export const MAX_ACTIVE_LIVE_THREADS = 2;
+/** Below this much 5h room even one live thread is enough to send the next thread elsewhere. */
+export const LOW_5H_CONCURRENCY_THRESHOLD = 0.25;
 
 type GroupWindows = { readonly weekly: ProviderQuotaBucket; readonly fiveHour: ProviderQuotaBucket };
 
@@ -69,6 +73,13 @@ function resetMs(bucket: ProviderQuotaBucket): number | null {
 }
 
 export function accountRoom(quota: ProviderQuota | null, family: ModelFamily | null = null): AccountRoom | null {
+  if (family === null && quota !== null) {
+    // The model is not known yet and agy opens sessions on Gemini, so a small
+    // Claude/GPT group must not drag the account down. All groups count only
+    // when Gemini has no room, so the account can still take a Claude/GPT thread.
+    const gemini = accountRoom(quota, "gemini");
+    if (gemini?.usable) return gemini;
+  }
   const groups = quota === null ? [] : modelGroups(quota, family);
   if (groups.length === 0) return null;
   const otherFamilyUsable = family !== null && meteredGroups(quota!).some((pair) => pairFamily(pair) !== family && hasRoom(pair));
@@ -99,21 +110,36 @@ function usableAgainAt(quota: ProviderQuota, family: ModelFamily | null): string
  * - `behind`: further behind on weekly room.
  */
 type Tier = "expiring" | "band" | "behind";
+type Ranked = { readonly room: AccountRoom; readonly liveThreads: number };
 const TIER_ORDER: Record<Tier | "unknown", number> = { expiring: 0, band: 1, behind: 2, unknown: 3 };
 
+/**
+ * Live threads already burning the account's 5h window hard enough that a new
+ * thread should open another account, or 0 when there is room for one more.
+ * Without it a burst of threads all lands on the most-drained account and hits
+ * its 5h limit together.
+ */
+function crowding({ room, liveThreads }: Ranked): number {
+  const saturated = liveThreads >= MAX_ACTIVE_LIVE_THREADS || (liveThreads >= 1 && room.fiveHour < LOW_5H_CONCURRENCY_THRESHOLD);
+  return saturated ? liveThreads : 0;
+}
+
 /** Sort key, compared element by element, lower first. */
-function rankKey(room: AccountRoom, tier: Tier, family: ModelFamily | null): number[] {
+function rankKey(ranked: Ranked, tier: Tier, family: ModelFamily | null): number[] {
+  const { room } = ranked;
+  // An uncrowded account first; among crowded ones, the one with fewer live threads.
+  const crowd = crowding(ranked);
   const startedFirst = room.active5h ? 0 : 1;
   // An active window drains lowest-first so it finishes and the 5h timers stay staggered.
   const drain = room.active5h ? room.fiveHour : 0;
   switch (tier) {
     case "expiring":
-      return [TIER_ORDER.expiring, room.weeklyResetsAtMs!, startedFirst, drain, -room.weekly];
+      return [TIER_ORDER.expiring, crowd, room.weeklyResetsAtMs!, startedFirst, drain, -room.weekly];
     case "band": {
       // Opening a fresh 5h window: use an account that can serve only this family
       // before waking one that other families still need.
       const keepsOthers = !room.active5h && family !== null && room.otherFamilyUsable ? 1 : 0;
-      return [TIER_ORDER.band, startedFirst, drain, keepsOthers, -room.weekly];
+      return [TIER_ORDER.band, crowd, startedFirst, drain, keepsOthers, -room.weekly];
     }
     case "behind":
       return [TIER_ORDER.behind, -room.weekly];
@@ -154,9 +180,10 @@ export function pickAccount(candidates: readonly Candidate[], family: ModelFamil
     return room.weekly >= weeklyFloor ? "band" : "behind";
   };
   // Unknown quota ranks after every known one.
-  const key = (room: AccountRoom | null) => (room === null ? [TIER_ORDER.unknown] : rankKey(room, tierOf(room), family));
+  const key = ({ room, liveThreads }: (typeof usable)[number]) =>
+    room === null ? [TIER_ORDER.unknown] : rankKey({ room, liveThreads }, tierOf(room), family);
   const [best] = usable
-    .map((candidate) => ({ candidate, key: key(candidate.room) }))
+    .map((candidate) => ({ candidate, key: key(candidate) }))
     .sort((a, b) => compareKeys(a.key, b.key) || a.candidate.liveThreads - b.candidate.liveThreads);
   return { ok: true, account: best!.candidate.name };
 }
