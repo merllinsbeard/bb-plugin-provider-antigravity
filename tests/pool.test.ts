@@ -7,14 +7,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AccountName } from "../src/pool/account.ts";
+import { clearExhausted, isMarkStale } from "../src/pool/exhaustion.ts";
 import { modelFamily } from "../src/pool/family.ts";
 import { pickAccount } from "../src/pool/pick.ts";
 import type { ProviderQuota } from "../src/usage/types.ts";
 
 const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
+const poolCli = fileURLToPath(new URL("../src/pool/cli.ts", import.meta.url));
 const fakeAgy = fileURLToPath(new URL("./fixtures/home/.local/bin/agy", import.meta.url));
 
-type Fractions = { gemini5h: number; geminiWeekly: number; other5h?: number; otherWeekly?: number };
+type Fractions = {
+  gemini5h: number;
+  geminiWeekly: number;
+  other5h?: number;
+  otherWeekly?: number;
+  /** Live reset times of the Gemini windows; the fixed RESET_5H and RESET_WEEK otherwise. */
+  geminiResets?: { "5h"?: string; weekly?: string };
+};
 
 const RESET_5H = "2026-11-23T18:00:00Z";
 const RESET_WEEK = "2026-11-28T09:00:00Z";
@@ -25,7 +34,8 @@ function usageJson(f: Fractions): string {
     name: window,
     window,
     remaining_fraction,
-    reset_time: window === "5h" ? RESET_5H : RESET_WEEK,
+    reset_time:
+      (id.startsWith("gemini-") ? f.geminiResets?.[window as "5h" | "weekly"] : undefined) ?? (window === "5h" ? RESET_5H : RESET_WEEK),
   });
   return JSON.stringify({
     status: "SUCCESS",
@@ -184,6 +194,48 @@ describe("pickAccount for a known model family", () => {
   });
 });
 
+describe("exhaustion marks", () => {
+  const at = (ms: number) => new Date(Date.parse("2026-11-26T12:00:00Z") + ms).toISOString();
+  const HOUR = 3600 * 1000;
+  const live = (gemini5h: number, resets: { "5h": string; weekly: string }) =>
+    quota({ gemini5h, geminiWeekly: 1, geminiResets: resets });
+
+  it("keeps a mark while a live window of its family still resets at the marked time, even with a sliver left", () => {
+    // 26.11 acc2: agy refused Gemini at 99.6% used; the mark landed 0.3s off the live 5h reset.
+    const mark = at(5 * HOUR);
+    expect(isMarkStale(mark, live(0.004, { "5h": at(5 * HOUR - 334), weekly: at(100 * HOUR) }), "gemini")).toBe(false);
+  });
+
+  it("calls a mark stale once Google reset the window early and every live reset moved days away", () => {
+    // 26.11 default/acc3/acc5: marks for 30.11, live weekly reset 03.12 with the window full again.
+    expect(isMarkStale(at(4 * 24 * HOUR), live(1, { "5h": at(5 * HOUR), weekly: at(7 * 24 * HOUR) }), "gemini")).toBe(true);
+  });
+
+  it("keeps a mark when live quota has no room or no windows for the family", () => {
+    const resets = { "5h": at(5 * HOUR), weekly: at(7 * 24 * HOUR) };
+    expect(isMarkStale(at(4 * 24 * HOUR), live(0, resets), "gemini")).toBe(false);
+    expect(isMarkStale(at(4 * 24 * HOUR), quota({ gemini5h: 1, geminiWeekly: 1 }), "argon")).toBe(false);
+  });
+
+  it("clears only the named account and family pairs", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "agy-marks-"));
+    const file = path.join(dir, "exhausted.json");
+    const marks = { acc2: { gemini: at(HOUR), "3p": at(2 * HOUR) }, acc3: { gemini: at(3 * HOUR) } };
+    writeFileSync(file, JSON.stringify({ version: 2, accounts: marks }));
+    try {
+      clearExhausted(file, [
+        { account: name("acc2"), family: "gemini" },
+        { account: name("acc5"), family: "gemini" },
+      ]);
+      expect(JSON.parse(readFileSync(file, "utf8")).accounts).toEqual({ acc2: { "3p": at(2 * HOUR) }, acc3: { gemini: at(3 * HOUR) } });
+      clearExhausted(file, [{ account: name("acc3"), family: "gemini" }]);
+      expect(JSON.parse(readFileSync(file, "utf8")).accounts).toEqual({ acc2: { "3p": at(2 * HOUR) } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("agy-pool launcher", () => {
   let root: string;
   let home: string;
@@ -290,6 +342,76 @@ describe("agy-pool launcher", () => {
     expect(accountOf((await launch({ AGY_POOL_ACCOUNT: "alt" })).stdout)).toBe("alt");
     expect(accountOf((await launch({ AGY_POOL_ACCOUNT: "alt", BB_THREAD_ID: "thr_manual" })).stdout)).toBe("alt");
     expect(existsSync(path.join(home, ".local", "state", "agy-pool", "bindings.json"))).toBe(false);
+  });
+
+  describe("stale exhaustion marks", () => {
+    const HOUR = 3600 * 1000;
+    const from = (ms: number) => new Date(Date.now() + ms).toISOString();
+    const marksFile = () => path.join(home, ".local", "state", "agy-pool", "exhausted.json");
+    const writeMarks = (accounts: Record<string, Record<string, string>>) => {
+      mkdirSync(path.dirname(marksFile()), { recursive: true });
+      writeFileSync(marksFile(), JSON.stringify({ version: 2, accounts }));
+    };
+    const marks = () => JSON.parse(readFileSync(marksFile(), "utf8")).accounts;
+    // What the relay runs when a Gemini prompt needs an account: `cli.ts resolve <pid> <refused|-> <reset ms> gemini`.
+    const resolveGemini = (refused = "-") =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+        const child = spawn(process.execPath, [poolCli, "resolve", "4242", refused, "0", "gemini"], { env: env({ BB_THREAD_ID: "thr_marks" }) });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => (stdout += chunk));
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.on("close", (code) => resolve({ code, stdout, stderr }));
+      });
+    const resolvedAccount = (stdout: string) => /AGY_POOL_RESOLVED=(\S+)/.exec(stdout)?.[1];
+    // A Gemini window Google reset early: full again, every live reset days away from the old mark.
+    const resetEarly = { gemini5h: 1, geminiWeekly: 1, geminiResets: { "5h": from(5 * HOUR), weekly: from(7 * 24 * HOUR) } };
+
+    it("clears a mark the live quota outlived and starts on that account, keeping its other marks", async () => {
+      const refusal = from(2 * HOUR);
+      account(stateDir(), { usage: { gemini5h: 0.004, geminiWeekly: 0.5, geminiResets: { "5h": refusal } } });
+      account(accountDir("acc3"), { usage: resetEarly, label: "acc3" });
+      const claudeRefusal = from(HOUR);
+      writeMarks({ default: { gemini: refusal }, acc3: { gemini: from(4 * 24 * HOUR), "3p": claudeRefusal } });
+
+      const run = await resolveGemini();
+      expect(run.code).toBe(0);
+      expect(resolvedAccount(run.stdout)).toBe("acc3");
+      expect(marks()).toEqual({ default: { gemini: refusal }, acc3: { "3p": claudeRefusal } });
+    });
+
+    it("keeps a mark whose window still resets at the marked time, though that window shows 0.4% left", async () => {
+      const refusal = from(2 * HOUR);
+      account(stateDir(), { usage: { gemini5h: 0.004, geminiWeekly: 0.5, geminiResets: { "5h": from(2 * HOUR - 700) } } });
+      writeMarks({ default: { gemini: refusal } });
+
+      const run = await resolveGemini();
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain(`every Antigravity account is out of Gemini quota. The nearest reset is ${refusal} (account "default")`);
+      expect(marks()).toEqual({ default: { gemini: refusal } });
+    });
+
+    it("never hands a prompt back to the account that just refused it", async () => {
+      account(stateDir(), { usage: resetEarly });
+      const stale = from(4 * 24 * HOUR);
+      writeMarks({ default: { gemini: stale } });
+
+      const run = await resolveGemini("default");
+      expect(run.code).toBe(1);
+      expect(marks()).toEqual({ default: { gemini: stale } });
+    });
+
+    it("recovers a stale-marked account when every unmarked account turns out to be out live", async () => {
+      account(stateDir(), { usage: { gemini5h: 0, geminiWeekly: 0.5 } });
+      account(accountDir("acc2"), { usage: { gemini5h: 0.3, geminiWeekly: 0 }, label: "acc2" });
+      account(accountDir("acc5"), { usage: resetEarly, label: "acc5" });
+      writeMarks({ acc5: { gemini: from(5 * 24 * HOUR) } });
+
+      const run = await resolveGemini();
+      expect(run.code).toBe(0);
+      expect(resolvedAccount(run.stdout)).toBe("acc5");
+      expect(marks()).toEqual({});
+    });
   });
 
   describe("one-shot print runs", () => {
