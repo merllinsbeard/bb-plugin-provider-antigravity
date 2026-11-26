@@ -17,7 +17,7 @@ import { QUOTA_MESSAGE, exhaustedUntil, isQuotaError, markExhausted, quotaResetM
 const launcher = fileURLToPath(new URL("../bin/agy-pool", import.meta.url));
 const fakeBin = fileURLToPath(new URL("./fixtures/fake-acp-agy", import.meta.url));
 
-function usageJson(gemini5h: number, geminiWeekly = gemini5h): string {
+function usageJson(gemini5h: number, geminiWeekly = gemini5h, threeP?: number): string {
   const bucket = (id: string, window: string, remaining_fraction: number) => ({
     id,
     name: window,
@@ -32,6 +32,9 @@ function usageJson(gemini5h: number, geminiWeekly = gemini5h): string {
       data: {
         groups: [
           { name: "Gemini Models", buckets: [bucket("gemini-weekly", "weekly", geminiWeekly), bucket("gemini-5h", "5h", gemini5h)] },
+          ...(threeP === undefined
+            ? []
+            : [{ name: "Claude and GPT models", buckets: [bucket("3p-weekly", "weekly", threeP), bucket("3p-5h", "5h", threeP)] }]),
         ],
       },
     },
@@ -119,15 +122,19 @@ describe("agy-pool ACP relay failover", () => {
   const accountDir = (name: string) => path.join(home, ".local", "share", "agy-accounts", name);
   const statePath = (file: string) => path.join(home, ".local", "state", "agy-pool", file);
 
-  function setupAccount(dir: string, opts: { label?: string; gemini5h: number; acpMode?: string }) {
+  function setupAccount(
+    dir: string,
+    opts: { label?: string; gemini5h: number; geminiWeekly?: number; threeP?: number; acpMode?: string; disabled?: boolean },
+  ) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "antigravity-oauth-token"), "{}");
-    writeFileSync(path.join(dir, "fake-usage.json"), usageJson(opts.gemini5h));
+    writeFileSync(path.join(dir, "fake-usage.json"), usageJson(opts.gemini5h, opts.geminiWeekly ?? opts.gemini5h, opts.threeP));
+    if (opts.disabled) writeFileSync(path.join(dir, "agy-pool-disabled"), "\n");
     if (opts.label) writeFileSync(path.join(dir, "fake-name"), opts.label);
     if (opts.acpMode) writeFileSync(path.join(dir, "fake-acp-mode"), opts.acpMode);
   }
 
-  function startRelay(threadId: string) {
+  function startRelay(threadId: string, extraEnv: Record<string, string> = {}) {
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("BB_") && !k.startsWith("AGY_")));
     const child = spawn(launcher, ["acp"], {
       env: {
@@ -136,6 +143,7 @@ describe("agy-pool ACP relay failover", () => {
         BB_THREAD_ID: threadId,
         BB_ANTIGRAVITY_EXECUTABLE: fakeBin,
         AGY_FAKE_ACP_LOG: logFile,
+        ...extraEnv,
       } as NodeJS.ProcessEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -308,6 +316,14 @@ describe("agy-pool ACP relay failover", () => {
     );
   });
 
+  const acpLog = (): any[] =>
+    existsSync(logFile)
+      ? readFileSync(logFile, "utf8")
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l))
+      : [];
+
   async function openSession(r: ReturnType<typeof startRelay>, model?: string): Promise<string> {
     r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
     await r.nextMatching((m) => m.id === 1);
@@ -422,6 +438,86 @@ describe("agy-pool ACP relay failover", () => {
     });
     expect(run.stdout).toContain("AGY_POOL_RESOLVED=default");
     expect(existsSync(statePath("exhausted.json"))).toBe(false);
+  });
+
+  it("fails a refused prompt over to an enabled account only, skipping a disabled one", async () => {
+    setupAccount(stateDir(), { gemini5h: 0.4, acpMode: "quota" });
+    setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.9, disabled: true });
+
+    const r = startRelay("thr_disabled_failover");
+    expect(await ask(r, await openSession(r), "Hi")).toMatch(/^ERROR:agy-pool: every Antigravity account is out of Gemini quota/);
+    expect(acpLog().some((e) => e.account === "alt")).toBe(false);
+  });
+
+  describe("first prompt of a new session", () => {
+    // `alt` can serve only Gemini, `default` serves both families: the start-time
+    // pick (model unknown) takes `default`, a Gemini session belongs on `alt`.
+    const pool = () => {
+      setupAccount(stateDir(), { gemini5h: 1, threeP: 1 });
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 1, threeP: 0 });
+    };
+    const bound = (thread: string) => JSON.parse(readFileSync(statePath("bindings.json"), "utf8")).threads[thread].account;
+    const calls = (account: string, method: string) => acpLog().filter((e) => e.account === account && e.method === method);
+
+    it("moves the empty session to the account that suits the chosen model before sending the prompt", async () => {
+      pool();
+      const r = startRelay("thr_rebalance");
+      const sid = await openSession(r, "gemini-4-neon-high");
+      expect(bound("thr_rebalance")).toBe("default");
+
+      expect(await ask(r, sid, "Hi")).toBe("ANSWER(alt):Hi");
+      expect(calls("default", "session/prompt")).toHaveLength(0);
+      expect(calls("alt", "session/load").map((e) => e.params.sessionId)).toEqual([sid]);
+      expect(calls("alt", "session/set_model").map((e) => e.params.modelId)).toEqual(["gemini-4-neon-high"]);
+      expect(r.messages.some((m) => m.params?.update?.content?.text === "REPLAYED_OLD_CHUNK")).toBe(false);
+      expect(bound("thr_rebalance")).toBe("alt");
+      expect(r.getStderr()).toContain('account "alt" suits gemini quota better than "default"');
+    });
+
+    it("keeps the running agy when the start-time account already suits the model", async () => {
+      setupAccount(stateDir(), { gemini5h: 1, threeP: 1 });
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 1, geminiWeekly: 0.5, threeP: 1 });
+      const r = startRelay("thr_stays");
+      expect(await ask(r, await openSession(r, "gemini-4-neon-high"), "Hi")).toBe("ANSWER(default):Hi");
+      expect(calls("default", "initialize")).toHaveLength(1);
+      expect(acpLog().some((e) => e.account === "alt")).toBe(false);
+    });
+
+    it("never moves the thread on a later prompt", async () => {
+      pool();
+      const r = startRelay("thr_turn2");
+      const sid = await openSession(r, "gemini-4-neon-high");
+      expect(await ask(r, sid, "One")).toBe("ANSWER(alt):One");
+      // `default` now looks far better for Gemini, but the thread has started on `alt`.
+      setupAccount(accountDir("alt"), { label: "alt", gemini5h: 0.2, geminiWeekly: 0.2, threeP: 0 });
+      r.send({ jsonrpc: "2.0", id: 5, method: "session/prompt", params: { sessionId: sid, prompt: [{ type: "text", text: "Two" }] } });
+      await r.nextMatching((m) => m.id === 5);
+      expect(calls("alt", "session/prompt").map((e) => e.params.prompt[0].text)).toEqual(["One", "Two"]);
+      expect(calls("alt", "initialize")).toHaveLength(1);
+      expect(bound("thr_turn2")).toBe("alt");
+    });
+
+    it("never moves a reopened session, which has history on its account", async () => {
+      pool();
+      mkdirSync(path.join(stateDir(), "conversations"), { recursive: true });
+      writeFileSync(path.join(stateDir(), "conversations", "sess-old.db"), "history");
+      const r = startRelay("thr_resumed");
+      r.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+      await r.nextMatching((m) => m.id === 1);
+      r.send({ jsonrpc: "2.0", id: 2, method: "session/load", params: { sessionId: "sess-old", cwd: "/tmp", mcpServers: [] } });
+      await r.nextMatching((m) => m.id === 2);
+      r.send({ jsonrpc: "2.0", id: 3, method: "session/set_model", params: { sessionId: "sess-old", modelId: "gemini-4-neon-high" } });
+      await r.nextMatching((m) => m.id === 3);
+      expect(await ask(r, "sess-old", "Hi")).toBe("REPLAYED_OLD_CHUNKANSWER(default):Hi");
+      expect(acpLog().some((e) => e.account === "alt")).toBe(false);
+    });
+
+    it("never moves a thread pinned with AGY_POOL_ACCOUNT", async () => {
+      pool();
+      const r = startRelay("thr_pinned", { AGY_POOL_ACCOUNT: "default" });
+      expect(await ask(r, await openSession(r, "gemini-4-neon-high"), "Hi")).toBe("ANSWER(default):Hi");
+      expect(acpLog().some((e) => e.account === "alt")).toBe(false);
+    });
   });
 
   it("compacts oversized available_commands_update payloads below BB's 64 KiB limit while keeping every command", async () => {
