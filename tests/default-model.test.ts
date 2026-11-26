@@ -13,9 +13,9 @@ const model = (id: string, isDefault: boolean, levels: string[]) => ({
 });
 
 describe("default model", () => {
-  it("starts new threads on Claude Opus 5.5 at medium instead of agy's pick", () => {
-    const catalog = [model("gemini-4-neon", true, ["low", "medium", "high", "xhigh"]), model("claude-opus-5-5", false, ["low", "medium", "high"])];
+  it("starts new threads on Gemini 4 Neon at high instead of agy's pick", () => {
+    const catalog = [model("gemini-4-neon", false, ["low", "medium", "high"]), model("claude-opus-5-5", true, ["low", "medium", "high"])];
     const shown = catalog.map(presentDefaultModel);
-    expect(shown.filter((m) => m.isDefault).map((m) => [m.id, m.defaultReasoningEffort])).toEqual([["claude-opus-5-5", "medium"]]);
+    expect(shown.filter((m) => m.isDefault).map((m) => [m.id, m.defaultReasoningEffort])).toEqual([["gemini-4-neon", "high"]]);
   });
 });
