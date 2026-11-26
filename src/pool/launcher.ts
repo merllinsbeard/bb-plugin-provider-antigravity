@@ -29,6 +29,12 @@ export type LaunchRequest = {
    * calling thread (often a Claude Code one) is never bound to an account.
    */
   readonly oneShot?: boolean;
+  /**
+   * Pick afresh for `family` even though the thread is bound: the relay asks this
+   * before the first prompt of a new session, when the start-time pick did not
+   * know the model yet.
+   */
+  readonly rebalance?: boolean;
 };
 
 export type ResolvePorts = {
@@ -85,23 +91,35 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
   // A thread keeps its account until agy refuses it for the family the thread
   // uses. Conversations live in one store shared by every account, so moving
   // is lossless.
-  if (bound && !outOf(bound.account)) {
+  const enabled = (name: AccountName) => byName(accounts, name)?.disabled !== true;
+  if (bound && !outOf(bound.account) && request.rebalance !== true && enabled(bound.account)) {
     const account = byName(accounts, bound.account);
     if (!account)
       return { ok: false, message: `agy-pool: thread ${threadId} is bound to account "${bound.account}", which no longer exists.` };
     const resolved = launchable(account);
     return resolved.ok ? record(resolved.account, bound.boundAt) : resolved;
   }
-  const signedIn = accounts.filter(isUsable).filter(isAuthenticated);
-  const authenticated = signedIn.filter((account) => !outOf(account.name));
-  const live = liveThreadCounts(bindings, ports.isAlive);
+  const authorized = accounts.filter(isUsable).filter(isAuthenticated);
+  const signedIn = authorized.filter((account) => !account.disabled);
+  if (signedIn.length === 0 && authorized.length > 0)
+    return {
+      ok: false,
+      message: `agy-pool: every signed-in Antigravity account is disabled (${authorized.map(({ name }) => name).join(", ")}). Run \`agy-pool enable <name>\`.`,
+    };
+  // A tie keeps the thread where it is (`pickAccount` sorts stably), so a rebalance never restarts agy for nothing.
+  const authenticated = signedIn
+    .filter((account) => !outOf(account.name))
+    .sort((a, b) => Number(b.name === bound?.account) - Number(a.name === bound?.account));
+  // The thread being placed is not load on the account it may leave.
+  const others = new Map([...bindings].filter(([id]) => id !== threadId));
+  const live = liveThreadCounts(others, ports.isAlive);
   const candidate = async (account: UsableAccount, probe: boolean) => ({
     name: account.name,
     quota: probe ? await ports.readQuota(account) : null,
     liveThreads: live.get(account.name) ?? 0,
   });
   const candidates = await Promise.all(authenticated.map((account) => candidate(account, authenticated.length > 1)));
-  const pick = authenticated.length === 0 && signedIn.length > 0 ? null : pickAccount(candidates, family);
+  const pick = authenticated.length === 0 && signedIn.length > 0 ? null : pickAccount(candidates, family, ports.now?.());
   if (pick?.ok) return record(byName(authenticated, pick.account)!, boundAt);
   if (pick?.reason === "no-authenticated-account") {
     const broken = accounts.flatMap((account) => (account.egress.kind === "invalid" ? [account.egress.problem] : []));
@@ -120,7 +138,7 @@ export async function resolveAccount(ports: ResolvePorts, request: LaunchRequest
     const marked = signedIn.filter((account) => !request.refused.includes(account.name) && markedUntil(account.name) !== undefined);
     const probed = await Promise.all(marked.map((account) => candidate(account, true)));
     const stale = probed.filter(({ name, quota }) => quota !== null && isMarkStale(markedUntil(name)!, quota, family));
-    const recovered = pickAccount(stale, family);
+    const recovered = pickAccount(stale, family, ports.now?.());
     if (recovered.ok) {
       ports.clearExhausted?.(stale.map(({ name }) => ({ account: name, family })));
       return record(byName(signedIn, recovered.account)!, boundAt);

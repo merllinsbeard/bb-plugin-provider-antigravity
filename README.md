@@ -5,7 +5,7 @@ Connects [Google Antigravity](https://antigravity.google) (`agy` CLI) to [bb](ht
 ## Features
 
 - **One provider, N accounts.** Several Google accounts sit behind the single `antigravity` provider in bb's model picker.
-- **Automatic quota-aware rotation & failover.** When a new bb thread starts, the launcher reads live 5-hour and weekly quotas across all signed-in accounts (Gemini and Claude/GPT model groups) and picks the account with the most headroom. Ties go to the account with fewer live threads. If the active account runs out of quota mid-session, the relay fails over seamlessly to another account with headroom for that model family (Gemini or Claude/GPT); an account out of one family keeps serving the other. When every account is out of the thread's family, the turn fails with the pool's reason and nearest reset instead of passing agy's refusal off as a reply.
+- **Automatic quota-aware rotation & failover.** When a new bb thread starts, the launcher reads live 5-hour and weekly quotas across all signed-in accounts (Gemini and Claude/GPT model groups) and picks an account: weekly room that would expire within 48 hours goes first, then an already-started 5-hour window is drained before a fresh one opens, and a fresh window opens on an account that can serve only the thread's model family before one that serves both. Before the first prompt of a new thread, once its model is known, the relay checks the pick again for that family and moves the still-empty session if another account fits better; after that the thread stays put. Ties go to the account with fewer live threads. If the active account runs out of quota mid-session, the relay fails over seamlessly to another account with headroom for that model family (Gemini or Claude/GPT); an account out of one family keeps serving the other. When every account is out of the thread's family, the turn fails with the pool's reason and nearest reset instead of passing agy's refusal off as a reply.
 - **Hand-off when the whole pool is out.** A visible top-level thread that fails this way continues by itself in a new thread in the same environment, on Claude Code Opus 5.5 Medium by default, whose prompt starts with `Continue from @thread:<id>`, as bb's own "Hand off to new thread" does. Child threads are left to their parent agent and plugin-started threads to their plugin, so one failure never has two actors relaunching it; each failure hands off at most once, recorded in the failed thread's plugin metadata. Change the target or turn it off with `bb plugin config provider-antigravity set quotaHandoffProvider|quotaHandoffModel|quotaHandoffReasoning <value>` and `set quotaHandoff false`.
 - **Sticky thread bindings with shared history.** Each thread stays bound to the account it started on (`~/.local/state/agy-pool/bindings.json`), while conversation stores (`conversations/`, `brain/`, `annotations/`) are shared so threads can fail over without losing history.
 - **Isolated accounts, shared config.** Extra accounts run in a narrow `bwrap` bind over `~/.gemini/antigravity-cli` (stored in `~/.local/share/agy-accounts/<name>/`), while `~/.gemini/config` (MCP servers, hooks, skills) and `~/.gemini/AGENTS.md` stay shared. Native skill roots (`.agents/skills`, `.gemini/skills`, `.gemini/antigravity/skills`) are declared for bb's composer.
@@ -64,9 +64,11 @@ Supported proxy schemes: `http://`, `https://`, and `socks5://` (credentials all
 ```sh
 ./bin/agy-pool list
 ./bin/agy-pool sync
+./bin/agy-pool disable acc2 "reason"   # take an account out of automatic picking
+./bin/agy-pool enable acc2
 ```
 
-`list` prints JSON with every account's sign-in state, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows. `sync` propagates `settings.json` from the default account to every added pool account and migrates any unshared conversation folders without touching auth tokens or proxy files.
+`list` prints JSON with every account's sign-in state, `disabled` flag, egress route (`direct`, `proxy host:port`, or `unusable`), bound and live thread counts, and live quota windows. `sync` propagates `settings.json` from the default account to every added pool account and migrates any unshared conversation folders without touching auth tokens or proxy files.
 
 ### 4. One-shot runs (`agy -p`)
 
@@ -87,7 +89,7 @@ Set `AGY_POOL_ACCOUNT=<name>` to force a specific account without recording a th
 - `BB_ANTIGRAVITY_EXECUTABLE` — explicit path to the `agy` binary.
 - `AGY_POOL_ACCOUNTS_DIR` — override `~/.local/share/agy-accounts`.
 - `AGY_POOL_STATE_DIR` — override `~/.local/state/agy-pool`.
-- `AGY_POOL_ACCOUNT` — force one pool account for a single invocation.
+- `AGY_POOL_ACCOUNT` — force one pool account for a single invocation (also reaches a disabled account; a pinned thread is never rebalanced).
 
 ## Development
 

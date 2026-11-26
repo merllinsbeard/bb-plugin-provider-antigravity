@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
 import { readEgress, routeEnv, type Route, type Unusable } from "./egress.ts";
@@ -8,9 +8,21 @@ export const DEFAULT_ACCOUNT = "default" as AccountName;
 declare const accountNameBrand: unique symbol;
 export type AccountName = string & { readonly [accountNameBrand]: true };
 
-export type UsableAccount = { readonly name: AccountName; readonly dir: string; readonly egress: Route };
+/** Marker file in an account folder that takes the account out of automatic picking (`agy-pool disable`). */
+export const DISABLED_FILE = "agy-pool-disabled";
 
-export type BrokenAccount = { readonly name: AccountName; readonly dir: string; readonly egress: Unusable };
+type AccountBase = {
+  readonly name: AccountName;
+  readonly dir: string;
+  /** The owner took the account out of automatic picking and failover; `AGY_POOL_ACCOUNT` still reaches it. */
+  readonly disabled: boolean;
+  /** First line of the marker file, when the owner gave a reason. */
+  readonly disabledReason: string | null;
+};
+
+export type UsableAccount = AccountBase & { readonly egress: Route };
+
+export type BrokenAccount = AccountBase & { readonly egress: Unusable };
 
 export type Account = UsableAccount | BrokenAccount;
 
@@ -61,9 +73,32 @@ export function listAccounts(paths: PoolPaths): Account[] {
   return [account(DEFAULT_ACCOUNT, paths.agyStateDir), ...added];
 }
 
+function readDisabled(dir: string): Pick<AccountBase, "disabled" | "disabledReason"> {
+  let text: string;
+  try {
+    text = readFileSync(path.join(dir, DISABLED_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { disabled: false, disabledReason: null };
+    // A marker that exists but cannot be read still means the owner disabled the account.
+    return { disabled: true, disabledReason: null };
+  }
+  const reason = text.split("\n")[0]!.trim();
+  return { disabled: true, disabledReason: reason === "" ? null : reason };
+}
+
 export function account(name: AccountName, dir: string): Account {
   const egress = readEgress(dir);
-  return egress.kind === "invalid" ? { name, dir, egress } : { name, dir, egress };
+  const toggle = readDisabled(dir);
+  return egress.kind === "invalid" ? { name, dir, ...toggle, egress } : { name, dir, ...toggle, egress };
+}
+
+/** Writes or removes the disabled marker. Idempotent: enabling an enabled account and re-disabling both converge. */
+export function setDisabled(account: Account, disabled: boolean, reason: string | null): void {
+  const file = path.join(account.dir, DISABLED_FILE);
+  if (!disabled) return rmSync(file, { force: true });
+  mkdirSync(account.dir, { recursive: true, mode: 0o700 });
+  writeFileSync(file, `${reason ?? ""}\n`, { mode: 0o600 });
+  chmodSync(file, 0o600);
 }
 
 export function isUsable(account: Account): account is UsableAccount {

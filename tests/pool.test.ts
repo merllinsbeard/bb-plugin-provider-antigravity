@@ -25,8 +25,9 @@ type Fractions = {
   geminiResets?: { "5h"?: string; weekly?: string };
 };
 
-const RESET_5H = "2026-11-23T18:00:00Z";
-const RESET_WEEK = "2026-11-28T09:00:00Z";
+// Relative to the run, so the weekly window is never "expiring soon" unless a test says so.
+const RESET_5H = new Date(Date.now() + 3 * 3600_000).toISOString();
+const RESET_WEEK = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
 
 function usageJson(f: Fractions): string {
   const bucket = (id: string, window: string, remaining_fraction: number) => ({
@@ -146,6 +147,99 @@ describe("pickAccount", () => {
       reason: "all-exhausted",
       nearestReset: { account: "alt", at: new Date(RESET_5H).toISOString() },
     });
+  });
+});
+
+describe("pickAccount scheduling", () => {
+  const now = new Date("2026-11-26T12:00:00Z");
+  const inHours = (hours: number) => new Date(now.getTime() + hours * 3600_000).toISOString();
+  const resetting = (hours: number, f: Omit<Fractions, "geminiResets">) => quota({ ...f, geminiResets: { weekly: inHours(hours) } });
+
+  it("burns a weekly window that resets within 48h before a fuller account resetting in six days", () => {
+    const pick = pickAccount(
+      [
+        { name: name("full"), quota: resetting(144, { gemini5h: 1, geminiWeekly: 1 }), liveThreads: 0 },
+        { name: name("expiring"), quota: resetting(20, { gemini5h: 1, geminiWeekly: 0.3 }), liveThreads: 0 },
+      ],
+      "gemini",
+      now,
+    );
+    expect(pick).toEqual({ ok: true, account: "expiring" });
+  });
+
+  it("takes the earlier of two expiring weekly windows", () => {
+    const pick = pickAccount(
+      [
+        { name: name("later"), quota: resetting(40, { gemini5h: 1, geminiWeekly: 0.9 }), liveThreads: 0 },
+        { name: name("sooner"), quota: resetting(10, { gemini5h: 1, geminiWeekly: 0.2 }), liveThreads: 0 },
+      ],
+      "gemini",
+      now,
+    );
+    expect(pick).toEqual({ ok: true, account: "sooner" });
+  });
+
+  it("does not chase an expiring window with 5% or less left, a reset already past, or an unset epoch reset", () => {
+    for (const [hours, weekly] of [
+      [20, 0.05],
+      [-1, 0.5],
+    ] as const) {
+      const pick = pickAccount(
+        [
+          { name: name("full"), quota: resetting(144, { gemini5h: 1, geminiWeekly: 1 }), liveThreads: 0 },
+          { name: name("other"), quota: resetting(hours, { gemini5h: 1, geminiWeekly: weekly }), liveThreads: 0 },
+        ],
+        "gemini",
+        now,
+      );
+      expect(pick).toEqual({ ok: true, account: "full" });
+    }
+    const epoch = quota({ gemini5h: 1, geminiWeekly: 0.5, geminiResets: { weekly: "1970-01-01T00:00:00Z" } });
+    expect(
+      pickAccount(
+        [
+          { name: name("full"), quota: resetting(144, { gemini5h: 1, geminiWeekly: 1 }), liveThreads: 0 },
+          { name: name("epoch"), quota: epoch, liveThreads: 0 },
+        ],
+        "gemini",
+        now,
+      ),
+    ).toEqual({ ok: true, account: "full" });
+  });
+
+  it("opens a fresh Gemini window on an account whose Claude/GPT room is gone before one that still serves both", () => {
+    const geminiOnly = resetting(144, { gemini5h: 1, geminiWeekly: 1, other5h: 0, otherWeekly: 0 });
+    const both = resetting(144, { gemini5h: 1, geminiWeekly: 1, other5h: 1, otherWeekly: 1 });
+    for (const order of [
+      ["acc5", "acc3"],
+      ["acc3", "acc5"],
+    ]) {
+      const candidates = order.map((raw) => ({ name: name(raw), quota: raw === "acc3" ? geminiOnly : both, liveThreads: 0 }));
+      expect(pickAccount(candidates, "gemini", now)).toEqual({ ok: true, account: "acc3" });
+    }
+    // Claude/GPT goes where that family still has room.
+    expect(
+      pickAccount(
+        [
+          { name: name("acc3"), quota: geminiOnly, liveThreads: 0 },
+          { name: name("acc5"), quota: both, liveThreads: 0 },
+        ],
+        "3p",
+        now,
+      ),
+    ).toEqual({ ok: true, account: "acc5" });
+  });
+
+  it("keeps draining an active 5h burst on a dual account over a fresh single-family one", () => {
+    const pick = pickAccount(
+      [
+        { name: name("acc3"), quota: resetting(144, { gemini5h: 1, geminiWeekly: 1, other5h: 0, otherWeekly: 0 }), liveThreads: 0 },
+        { name: name("acc5"), quota: resetting(144, { gemini5h: 0.6, geminiWeekly: 0.9, other5h: 1, otherWeekly: 1 }), liveThreads: 1 },
+      ],
+      "gemini",
+      now,
+    );
+    expect(pick).toEqual({ ok: true, account: "acc5" });
   });
 });
 
@@ -523,6 +617,53 @@ describe("agy-pool launcher", () => {
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(readFileSync(log, "utf8")).toContain("term alt");
+  });
+
+  describe("disable and enable", () => {
+    const marker = () => path.join(accountDir("alt"), "agy-pool-disabled");
+
+    it("takes an account out of picking until it is enabled again, and shows it in the list", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      const disabled = await launch({}, ["disable", "alt", "ban", "risk"]);
+      expect(disabled.code).toBe(0);
+      expect(JSON.parse(disabled.stdout)).toEqual({ account: "alt", disabled: true, disabledReason: "ban risk" });
+      expect(statSync(marker()).mode & 0o777).toBe(0o600);
+
+      expect(accountOf((await launch({ BB_THREAD_ID: "thr_off" })).stdout)).toBe("default");
+      expect(accountOf((await launch({ BB_THREAD_ID: "thr_pinned", AGY_POOL_ACCOUNT: "alt" })).stdout)).toBe("alt");
+      const listed = JSON.parse((await launch({}, ["list"])).stdout).accounts;
+      expect(listed.map((a: { name: string; disabled: boolean; disabledReason?: string }) => [a.name, a.disabled, a.disabledReason])).toEqual([
+        ["default", false, undefined],
+        ["alt", true, "ban risk"],
+      ]);
+
+      for (let i = 0; i < 2; i++) {
+        const enabled = await launch({}, ["enable", "alt"]);
+        expect(enabled.code).toBe(0);
+        expect(JSON.parse(enabled.stdout)).toEqual({ account: "alt", disabled: false });
+      }
+      expect(existsSync(marker())).toBe(false);
+      expect(accountOf((await launch({ BB_THREAD_ID: "thr_on" })).stdout)).toBe("alt");
+    });
+
+    it("moves a thread bound to an account that was disabled since", async () => {
+      account(accountDir("alt"), { usage: { gemini5h: 1, geminiWeekly: 1 }, label: "alt" });
+      expect(accountOf((await launch({ BB_THREAD_ID: "thr_moved" })).stdout)).toBe("alt");
+      await launch({}, ["disable", "alt"]);
+      expect(accountOf((await launch({ BB_THREAD_ID: "thr_moved" })).stdout)).toBe("default");
+      expect(bindings().threads.thr_moved.account).toBe("default");
+    });
+
+    it("rejects an unknown account and names `agy-pool enable` when every signed-in account is disabled", async () => {
+      const unknown = await launch({}, ["disable", "nobody"]);
+      expect(unknown.code).toBe(1);
+      expect(unknown.stderr).toContain('no account named "nobody"');
+
+      await launch({}, ["disable", "default"]);
+      const run = await launch({ BB_THREAD_ID: "thr_none" });
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain("every signed-in Antigravity account is disabled (default). Run `agy-pool enable <name>`.");
+    });
   });
 
   it("lists every account with its sign-in state and quota", async () => {

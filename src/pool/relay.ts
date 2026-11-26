@@ -8,7 +8,10 @@
 // prompt whose family is already known to be out on this account moves before
 // it is sent. When no account can take a refused prompt, the relay answers it
 // with a JSON-RPC error carrying the pool's reason, so bb fails the turn instead
-// of recording agy's refusal as a reply.
+// of recording agy's refusal as a reply. A thread starts before its model is
+// known, so right before the first prompt of a brand-new session the relay asks
+// the pool again for that model's family and, when another account suits it
+// better, moves the still-empty session there; after that the thread stays put.
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
@@ -86,22 +89,23 @@ function parse(line: string): Message | null {
 /**
  * Runs the pool's account choice for `family` (and optional exhaustion mark) under bindings.lock.
  * A one-shot run (`agy -p` and other non-ACP calls) is picked like a new thread but bound to nothing.
+ * A rebalance picks afresh for `family` although the thread is bound.
  */
 function resolveLaunch(
   family: ModelFamily | null,
   exhaust?: { readonly accounts: readonly AccountName[]; readonly resetMs: number },
-  oneShot = false,
+  { oneShot = false, rebalance = false }: { readonly oneShot?: boolean; readonly rebalance?: boolean } = {},
 ): Resolution {
   mkdirSync(path.dirname(lockFile), { recursive: true });
   const args = [lockFile, process.execPath, cli, "resolve", String(process.pid)];
   if (exhaust !== undefined || family !== null)
     args.push(exhaust?.accounts.join(",") || "-", String(Math.round(exhaust?.resetMs ?? 0)), ...(family === null ? [] : [family]));
-  // A one-shot flag left in the caller's environment must not turn a thread's launch into an unbound pick.
-  const { AGY_POOL_ONE_SHOT: _inherited, ...callerEnv } = process.env;
+  // Flags left in the caller's environment must not change how this launch is picked.
+  const { AGY_POOL_ONE_SHOT: _oneShot, AGY_POOL_REBALANCE: _rebalance, ...callerEnv } = process.env;
   const run = spawnSync("flock", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: oneShot ? { ...callerEnv, AGY_POOL_ONE_SHOT: "1" } : callerEnv,
+    env: { ...callerEnv, ...(oneShot ? { AGY_POOL_ONE_SHOT: "1" } : {}), ...(rebalance ? { AGY_POOL_REBALANCE: "1" } : {}) },
   });
   // bb shows the launcher's stderr when the agent exits, so the pool's own lines still go there.
   const stderr = run.stderr ?? "";
@@ -150,6 +154,14 @@ function sessionModel(result: Record<string, unknown>): string | null {
   return typeof current === "string" ? current : null;
 }
 
+/**
+ * Whether the account still may change for a better fit: `provisional` until the
+ * relay sends its first prompt or reopens an existing session. A reopened
+ * session has history and a sent prompt has warmed agy's prompt cache on this
+ * account, so from then on only a quota refusal moves the thread.
+ */
+type Placement = "provisional" | "settled";
+
 const out = (line: string): void => {
   process.stdout.write(`${line}\n`);
 };
@@ -167,6 +179,7 @@ class Relay {
   private readonly internal = new Map<string, (message: Message) => void>();
   private readonly loading = new Set<string>();
   private swapping: string[] | null = null;
+  private placement: Placement = "provisional";
   private nextId = 0;
   private stopping = false;
 
@@ -217,7 +230,12 @@ class Relay {
     const message = parse(line);
     if (message?.method !== undefined && message.id !== undefined) {
       const prompt = this.track(message);
-      if (prompt && this.outOfQuota(prompt.family)) return void this.swap(prompt, null);
+      if (prompt) {
+        const rebalance = this.mayRebalance(prompt);
+        this.placement = "settled";
+        if (this.outOfQuota(prompt.family)) return void this.swap(prompt, null);
+        if (rebalance) return void this.swap(prompt, null, true);
+      }
     }
     this.child.stdin.write(`${line}\n`);
   }
@@ -229,12 +247,28 @@ class Relay {
     );
   }
 
+  /**
+   * The first prompt of a session this relay created, with its model known, on a
+   * pool-picked account: the start-time pick did not know the model, so ask again.
+   */
+  private mayRebalance(prompt: Prompt): boolean {
+    return (
+      this.placement === "provisional" &&
+      prompt.family !== null &&
+      this.sessions.has(prompt.sessionId) &&
+      this.account !== null &&
+      !process.env.AGY_POOL_ACCOUNT &&
+      !!process.env.BB_THREAD_ID
+    );
+  }
+
   private track(message: Message): Prompt | null {
     const params = message.params ?? {};
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : null;
     if (message.method === "initialize") this.initialize = message;
     else if (message.method === "session/new") this.opening.set(idKey(message.id), params);
     else if ((message.method === "session/load" || message.method === "session/resume") && sessionId) {
+      this.placement = "settled";
       this.sessions.set(sessionId, params);
       this.opening.set(idKey(message.id), params);
     } else if (message.method?.startsWith("session/set_") && sessionId) {
@@ -324,24 +358,44 @@ class Relay {
     });
   }
 
+  /** Opens every session of this relay on the freshly attached agy and replays its settings. */
+  private async reopen(): Promise<{ readonly step: string; readonly error: unknown } | null> {
+    const ready = await this.request("initialize", this.initialize!.params);
+    if (ready.error) return { step: "initialize", error: ready.error };
+    for (const [sessionId, params] of this.sessions) {
+      this.loading.add(sessionId);
+      const loaded = await this.request("session/load", { ...params, sessionId });
+      this.loading.delete(sessionId);
+      if (loaded.error) return { step: "session/load", error: loaded.error };
+      for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
+    }
+    return null;
+  }
+
   /**
    * Moves the session to another account and sends the prompt there. `response`
    * is agy's answer to a refused prompt, or null when the prompt moves before
-   * it was sent because its family is already out on this account.
+   * it was sent: because its family is already out on this account, or, with
+   * `rebalance`, because the pool finds a better account for the first prompt
+   * of a new session. When the pool keeps this account, the prompt goes to the
+   * running agy unchanged.
    */
-  private async swap(prompt: Prompt, response: string | null): Promise<void> {
+  private async swap(prompt: Prompt, response: string | null, rebalance = false): Promise<void> {
     const buffered: string[] = [];
     this.swapping = buffered;
     const fail = (code: number, message: string) => out(JSON.stringify({ jsonrpc: "2.0", id: prompt.message.id, error: { code, message } }));
     // The account that refused; `attach` below replaces `this.account` with the one the swap moves to.
     const from = this.account;
     const outOf = prompt.family === null ? "quota" : `${familyLabel(prompt.family)} quota`;
+    // Set once agy runs on the target account; from then on the prompt can no longer go to the agy that had the session.
+    let moved = false;
     // `reason` says why the prompt could not move: the pool's answer, or the error the new account gave.
     const giveUp = (reason?: string) => {
       const alive = this.child.exitCode === null && this.child.signalCode === null;
       if (!alive) fail(-32603, "agy exited during account swap");
-      // agy refused the prompt for quota and no account can take it: fail the turn rather than pass the refusal off as a reply.
-      else if (response !== null)
+      // agy refused the prompt for quota and no account can take it, or the target could not open the session:
+      // fail the turn rather than pass a refusal off as a reply or send the prompt to an agy without the session.
+      else if (response !== null || moved)
         fail(-32000, reason ?? `agy-pool: account "${from}" is out of ${outOf} and the prompt could not move to another account.`);
       // The prompt has not been sent yet; agy itself decides whether the account still serves it.
       else this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
@@ -353,29 +407,46 @@ class Relay {
       const refusedBy = this.account !== null && prompt.refusal !== null ? [this.account, ...prompt.refusedBy] : prompt.refusedBy;
       const exhaust =
         refusedBy.length > 0 ? { accounts: refusedBy, resetMs: prompt.refusal === null ? 0 : quotaResetMs(prompt.refusal.text) } : undefined;
-      const resolved = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust);
+      const resolved = this.initialize === null ? null : resolveLaunch(prompt.family, exhaust, { rebalance });
       if (resolved === null) return giveUp();
       if (!resolved.ok) return giveUp(resolved.message);
       const next = resolved.launch;
       if (next.account === this.account) return giveUp();
       const scope = prompt.family === null ? "quota" : `${prompt.family} quota`;
-      process.stderr.write(`agy-pool: account "${this.account}" is out of ${scope}; moving to "${next.account}".\n`);
+      process.stderr.write(
+        rebalance
+          ? `agy-pool: account "${next.account}" suits ${scope} better than "${this.account}"; moving the new session before its first prompt.\n`
+          : `agy-pool: account "${this.account}" is out of ${scope}; moving to "${next.account}".\n`,
+      );
       const previous = this.child;
       this.attach(next);
+      // A rebalance keeps the start-time agy until the target holds the session, so a failed move costs nothing.
+      if (rebalance) {
+        const target = this.child;
+        const stayed = (step: string, error: unknown) => {
+          const detail = (error as { message?: unknown }).message;
+          process.stderr.write(
+            `agy-pool: moving the new session to "${next.account}" failed at ${step} (${typeof detail === "string" ? detail : JSON.stringify(error)}); it stays on "${from}".\n`,
+          );
+          this.child = previous;
+          this.account = from;
+          stop(target);
+          return giveUp();
+        };
+        const failure = await this.reopen();
+        if (failure) return stayed(failure.step, failure.error);
+        stop(previous);
+        this.child.stdin.write(`${JSON.stringify(prompt.message)}\n`);
+        return;
+      }
+      moved = true;
       stop(previous);
       const moveFailed = (step: string, error: unknown) => {
         const detail = (error as { message?: unknown }).message;
         return `agy-pool: account "${from}" is out of ${outOf}; moving the session to "${next.account}" failed at ${step}: ${typeof detail === "string" ? detail : JSON.stringify(error)}`;
       };
-      const ready = await this.request("initialize", this.initialize!.params);
-      if (ready.error) return giveUp(moveFailed("initialize", ready.error));
-      for (const [sessionId, params] of this.sessions) {
-        this.loading.add(sessionId);
-        const loaded = await this.request("session/load", { ...params, sessionId });
-        this.loading.delete(sessionId);
-        if (loaded.error) return giveUp(moveFailed("session/load", loaded.error));
-        for (const setting of this.settings.get(sessionId)?.values() ?? []) await this.request(setting.method!, setting.params);
-      }
+      const failure = await this.reopen();
+      if (failure) return giveUp(moveFailed(failure.step, failure.error));
       const message = prompt.produced
         ? { ...prompt.message, params: { ...prompt.message.params, prompt: [{ type: "text", text: CONTINUE_PROMPT }] } }
         : prompt.message;
@@ -467,7 +538,7 @@ async function runOnce(): Promise<void> {
   let exhaust: { readonly accounts: readonly AccountName[]; readonly resetMs: number } | undefined;
   let last: Attempt | null = null;
   for (;;) {
-    const resolved = resolveLaunch(family, exhaust, true);
+    const resolved = resolveLaunch(family, exhaust, { oneShot: true });
     if (!resolved.ok) {
       if (last) return finish(last.stdout, last.code || 1);
       process.exit(1);
