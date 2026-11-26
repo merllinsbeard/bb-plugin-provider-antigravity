@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { AGY_STATE_DIR, AGY_TOKEN_FILE } from "../identity.ts";
@@ -10,6 +11,15 @@ export type AccountName = string & { readonly [accountNameBrand]: true };
 
 /** Marker file in an account folder that takes the account out of automatic picking (`agy-pool disable`). */
 export const DISABLED_FILE = "agy-pool-disabled";
+
+/**
+ * Per-account machine id, bound read-only over `/etc/machine-id` inside the
+ * account's sandbox so added accounts do not report the host's id (and
+ * `/var/lib/dbus/machine-id`, a symlink to it on this host, follows along).
+ */
+export const MACHINE_ID_FILE = "agy-pool-machine-id";
+export const HOST_MACHINE_ID = "/etc/machine-id";
+const MACHINE_ID = /^[0-9a-f]{32}\n?$/;
 
 type AccountBase = {
   readonly name: AccountName;
@@ -127,6 +137,24 @@ export function readAccountEmail(account: Account): string | null {
  */
 export const SHARED_DIRS = ["conversations", "brain", "annotations"] as const;
 
+/**
+ * Gives an account folder its own machine id (32 lowercase hex and a newline,
+ * mode 0600) unless it already holds a valid one. Idempotent; written through
+ * a temp file and a rename so a crash never leaves a half-written id.
+ */
+export function ensureMachineId(accountDir: string): string {
+  const file = path.join(accountDir, MACHINE_ID_FILE);
+  try {
+    if (MACHINE_ID.test(readFileSync(file, "utf8"))) return file;
+  } catch {}
+  mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const tmpFile = path.join(accountDir, `.${MACHINE_ID_FILE}.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmpFile, `${randomBytes(16).toString("hex")}\n`, { mode: 0o600 });
+  chmodSync(tmpFile, 0o600);
+  renameSync(tmpFile, file);
+  return file;
+}
+
 export function accountCommand(
   paths: PoolPaths,
   account: UsableAccount,
@@ -136,12 +164,14 @@ export function accountCommand(
 ): Command {
   const env = routeEnv(account.egress);
   if (account.name === DEFAULT_ACCOUNT) return { command: agy, args, env };
+  const machineId = path.join(account.dir, MACHINE_ID_FILE);
+  const identity = existsSync(machineId) && existsSync(HOST_MACHINE_ID) ? ["--ro-bind", machineId, HOST_MACHINE_ID] : [];
   const shared = options?.shareConversations
     ? SHARED_DIRS.flatMap((dir) => ["--bind", path.join(paths.agyStateDir, dir), path.join(paths.agyStateDir, dir)])
     : [];
   return {
     command: "bwrap",
-    args: ["--dev-bind", "/", "/", "--bind", account.dir, paths.agyStateDir, ...shared, agy, ...args],
+    args: ["--dev-bind", "/", "/", "--bind", account.dir, paths.agyStateDir, ...identity, ...shared, agy, ...args],
     env,
   };
 }
@@ -193,6 +223,7 @@ export function syncAccountConfig(paths: PoolPaths, account: Account): AccountSy
     return { account: account.name, dir: account.dir, authenticated, settings: "default", migratedConversations };
   }
   mkdirSync(account.dir, { recursive: true, mode: 0o700 });
+  ensureMachineId(account.dir);
   const sourceFile = path.join(paths.agyStateDir, "settings.json");
   if (!existsSync(sourceFile)) {
     return { account: account.name, dir: account.dir, authenticated, settings: "missing-source", migratedConversations };

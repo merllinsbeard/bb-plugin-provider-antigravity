@@ -10,7 +10,7 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "acp" ]; then
-  printf 'account=%s pid=%s args=%s%s\n' "$name" "$$" "$*" "$egress"
+  printf 'account=%s pid=%s machine=%s args=%s%s\n' "$name" "$$" "$(cat /etc/machine-id 2>/dev/null)" "$*" "$egress"
   if [ "$AGY_FAKE_MODE" = "serve" ]; then
     trap 'echo "term $(cat "$state/fake-name" 2>/dev/null || echo default)" >> "$AGY_FAKE_LOG"; exit 0' TERM
     while :; do sleep 0.1; done
@@ -34,6 +34,7 @@ if [ "$1" = "-p" ] && [ "$2" != "/usage" ]; then
   printf '{"status":"SUCCESS","response":"ran on %s"}\n' "$name"
   exit 0
 fi
+[ -n "${AGY_FAKE_DELAY:-}" ] && sleep "$AGY_FAKE_DELAY"
 case "$AGY_FAKE_MODE" in
   auth)
     echo "Authentication required. Opening browser to sign in..." >&2

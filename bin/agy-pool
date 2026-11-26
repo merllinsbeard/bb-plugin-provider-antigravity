@@ -18,6 +18,7 @@ launch() {
 case "${1:-}" in
   list) exec node "$cli" list ;;
   sync) exec node "$cli" sync ;;
+  stats) exec node "$cli" stats "${@:2}" ;;
   disable | enable) exec node "$cli" "$@" ;;
   login)
     prefix=$(node "$cli" prepare-login "${@:2}")

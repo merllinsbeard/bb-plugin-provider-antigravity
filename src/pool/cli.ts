@@ -24,6 +24,7 @@ import { clearExhausted, exhaustionFile, markExhausted, readExhausted } from "./
 import { parseModelFamily } from "./family.ts";
 import { resolveAccount } from "./launcher.ts";
 import { probeAccount } from "./probe-account.ts";
+import { SINCE_WINDOWS, formatReport, parseSince, scanConversations, type Since } from "./stats.ts";
 
 const home = os.homedir();
 const paths = poolPaths(process.env, home);
@@ -148,23 +149,40 @@ function describeEgress(account: Account): string {
 async function list(): Promise<void> {
   const bindings = readBindings(paths.bindingsFile);
   const live = liveThreadCounts(bindings);
-  const accounts = [];
-  for (const account of listAccounts(paths)) {
-    const outcome = await probeAccount(paths, account, locateBinary);
-    accounts.push({
-      name: account.name,
-      dir: account.dir,
-      egress: describeEgress(account),
-      authenticated: isAuthenticated(account),
-      disabled: account.disabled,
-      ...(account.disabledReason === null ? {} : { disabledReason: account.disabledReason }),
-      boundThreads: [...bindings.values()].filter((binding) => binding.account === account.name).length,
-      liveThreads: live.get(account.name) ?? 0,
-      quota: outcome.ok ? outcome.reading.windows : null,
-      ...(outcome.ok ? {} : { quotaStatus: outcome.failure }),
-    });
-  }
+  const accounts = await Promise.all(
+    listAccounts(paths).map(async (account) => {
+      const outcome = await probeAccount(paths, account, locateBinary);
+      return {
+        name: account.name,
+        dir: account.dir,
+        egress: describeEgress(account),
+        authenticated: isAuthenticated(account),
+        disabled: account.disabled,
+        ...(account.disabledReason === null ? {} : { disabledReason: account.disabledReason }),
+        boundThreads: [...bindings.values()].filter((binding) => binding.account === account.name).length,
+        liveThreads: live.get(account.name) ?? 0,
+        quota: outcome.ok ? outcome.reading.windows : null,
+        ...(outcome.ok ? {} : { quotaStatus: outcome.failure }),
+      };
+    }),
+  );
   process.stdout.write(`${JSON.stringify({ bindingsFile: paths.bindingsFile, accounts }, null, 2)}\n`);
+}
+
+const STATS_USAGE = `agy-pool: usage \`agy-pool stats [--since ${Object.keys(SINCE_WINDOWS).join("|")}] [--json]\`.`;
+
+/** `stats [--since 24h|7d|30d|all] [--json]`: token and cache usage from the shared conversation store. */
+function stats(args: readonly string[]): void {
+  let since: Since = "24h";
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (flag === "--json") json = true;
+    else if (flag === "--since") since = parseSince(args[++i] ?? "") ?? fail(STATS_USAGE);
+    else fail(STATS_USAGE);
+  }
+  const report = scanConversations(path.join(paths.agyStateDir, "conversations"), since);
+  process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatReport(report));
 }
 
 function syncAll(): void {
@@ -204,6 +222,9 @@ switch (command) {
     break;
   case "sync":
     syncAll();
+    break;
+  case "stats":
+    stats(arg === undefined ? [] : [arg, ...more]);
     break;
   case "disable":
   case "enable":
