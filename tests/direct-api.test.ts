@@ -236,6 +236,20 @@ describe("direct quota API", () => {
     expect(seen.flatMap((s) => s.curlArgv).filter((line) => line.includes(PROXY_PASSWORD) || line.includes(TOKEN))).toEqual([]);
   });
 
+  it("fails closed when the proxy refuses the HTTPS tunnel, without trying agy", async () => {
+    const connects: string[] = [];
+    proxy.on("connect", (req, socket) => {
+      connects.push(req.url ?? "");
+      socket.end("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+    });
+    const dir = accountDir({ proxyUrl: `http://user:${PROXY_PASSWORD}@127.0.0.1:${proxyPort}` });
+    const acc = readAccount("acc2" as AccountName, dir);
+    if (acc.egress.kind !== "proxy") throw new Error("expected a proxied account");
+    const read = await readDirectQuota({ accountDir: dir, route: acc.egress, base: "https://quota.invalid" });
+    expect(connects).toContain("quota.invalid:443");
+    expect(read).toEqual({ kind: "error", message: `proxy 127.0.0.1:${proxyPort} failed; quota was not read.` });
+  });
+
   it("fails closed when the proxy is down: no direct request, no agy run, no credentials in the error", async () => {
     const closed = http.createServer();
     const deadPort = await listen(closed);
@@ -245,7 +259,7 @@ describe("direct quota API", () => {
     expect(agyRuns).toBe(0);
     expect(outcome).toEqual({
       ok: false,
-      failure: { status: "error", message: `proxy 127.0.0.1:${deadPort} did not answer; quota was not read.` },
+      failure: { status: "error", message: `proxy 127.0.0.1:${deadPort} failed; quota was not read.` },
     });
   });
 });

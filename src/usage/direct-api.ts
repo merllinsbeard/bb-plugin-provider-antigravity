@@ -30,8 +30,12 @@ const USER_AGENT = "antigravity/hub/2.33.0 (aidev_client; os_type=linux; arch=am
 const EXPIRY_MARGIN_MS = 60_000;
 const MAX_TIME_S = 8;
 const MAX_BODY_BYTES = 1024 * 1024;
-/** curl exit codes that, with a proxy configured, mean the proxy itself did not answer. */
-const PROXY_DOWN_EXITS: ReadonlySet<number> = new Set([5, 7, 97]);
+/**
+ * curl exit codes that, with a proxy configured, mean the proxy failed: it did
+ * not resolve or answer (5, 7), refused the tunnel (56, e.g. CONNECT 407/502),
+ * broke TLS (35) or the SOCKS handshake (97).
+ */
+const PROXY_FAILED_EXITS: ReadonlySet<number> = new Set([5, 7, 35, 56, 97]);
 
 const tokenFileSchema = z.object({
   token: z.object({ access_token: z.string().min(1), expiry: z.string() }),
@@ -111,7 +115,7 @@ function parseTier(exchange: Exchange): Tier | null {
 
 function classifyQuota(exchange: Exchange, route: Route, tier: Tier | null): DirectRead {
   if (exchange.kind === "proxy-down" && route.kind === "proxy")
-    return { kind: "error", message: `proxy ${route.endpoint} did not answer; quota was not read.` };
+    return { kind: "error", message: `proxy ${route.endpoint} failed; quota was not read.` };
   if (exchange.kind !== "response") return { kind: "fallback" };
   if (exchange.status === 403 && exchange.body.includes("UNSUPPORTED_LOCATION"))
     return {
@@ -169,7 +173,8 @@ function curlPost(route: Route, url: string, accessToken: string, body: unknown)
       child = experimental_spawnHostProcess(
         "curl",
         ["--disable", "--silent", "--max-time", String(MAX_TIME_S), "--config", "-"],
-        { stdio: ["pipe", "pipe", "ignore"], env: sanitizeInheritedChildProcessEnv({ env: process.env }) },
+        // SSLKEYLOGFILE would make curl write the TLS keys that decrypt the bearer token.
+        { stdio: ["pipe", "pipe", "ignore"], env: { ...sanitizeInheritedChildProcessEnv({ env: process.env }), SSLKEYLOGFILE: undefined } },
       );
     } catch {
       resolve({ kind: "failed" });
@@ -193,7 +198,7 @@ function curlPost(route: Route, url: string, accessToken: string, body: unknown)
     child.on("error", () => finish({ kind: "failed" }));
     child.on("close", (code) => {
       if (code !== 0)
-        return finish(route.kind === "proxy" && code !== null && PROXY_DOWN_EXITS.has(code) ? { kind: "proxy-down" } : { kind: "failed" });
+        return finish(route.kind === "proxy" && code !== null && PROXY_FAILED_EXITS.has(code) ? { kind: "proxy-down" } : { kind: "failed" });
       const out = Buffer.concat(chunks).toString("utf8");
       const cut = out.lastIndexOf("\n");
       const status = Number(out.slice(cut + 1));
