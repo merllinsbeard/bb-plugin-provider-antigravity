@@ -20,6 +20,8 @@ type Setup = {
 /** A plugin host whose thread metadata lives in a map the test owns, so it survives a plugin reload like bb's does. */
 function host({ settings = {}, errors = {}, logs = {}, notify = async () => ({ ok: true, channels: ["mobile"] }) }: Setup = {}) {
   const metadata = new Map<string, Record<string, unknown>>();
+  /** Threads the owner archived. */
+  const archived = new Set<string>();
   const notifications: { pluginId: string; method: string; input: any }[] = [];
   let spawned = 0;
   const log = (threadId: string): Row[] => {
@@ -39,9 +41,10 @@ function host({ settings = {}, errors = {}, logs = {}, notify = async () => ({ o
       threads: {
         events: {
           // Like bb: oldest first unless `order: "desc"`, filtered by `types`, cut to `limit`.
-          list: async ({ threadId, types, order, limit }: { threadId: string; types?: string[]; order?: string; limit?: string }) => {
+          list: async ({ threadId, types, order, limit, afterSeq }: { threadId: string; types?: string[]; order?: string; limit?: string; afterSeq?: string }) => {
             const rows = log(threadId)
               .map((row, index) => ({ ...row, seq: index + 1, data: row.data ?? {} }))
+              .filter((row) => afterSeq === undefined || row.seq > Number(afterSeq))
               .filter((row) => types === undefined || types.includes(row.type));
             if (order === "desc") rows.reverse();
             return limit === undefined ? rows : rows.slice(0, Number(limit));
@@ -55,6 +58,8 @@ function host({ settings = {}, errors = {}, logs = {}, notify = async () => ({ o
         },
         defaultExecutionOptions: async () => ({ model: "claude-opus-5-5", permissionMode: "full", reasoningLevel: "medium", serviceTier: "default", source: "client/turn/requested" }),
         spawn: async () => ({ id: `thr_next${++spawned}` }),
+        send: async () => ({ ok: true, delivery: "sent" }),
+        get: async ({ threadId }: { threadId: string }) => makeThreadResponse({ id: threadId, archivedAt: archived.has(threadId) ? 1 : null }),
       },
       plugins: {
         callRpc: async ({ pluginId, method, input }: { pluginId: string; method: string; input: unknown }) => {
@@ -71,7 +76,8 @@ function host({ settings = {}, errors = {}, logs = {}, notify = async () => ({ o
       error: errors[thread.id]?.message ?? null,
     });
   const spawns = () => harness.inspection.sdk.callsTo("threads.spawn").map(([args]) => args as any);
-  return { bb, harness, fail, spawns, metadata, notifications };
+  const sends = () => harness.inspection.sdk.callsTo("threads.send").map(([args]) => args as any);
+  return { bb, harness, fail, spawns, sends, metadata, notifications, archived };
 }
 
 describe("parsePoolExhaustion", () => {
@@ -198,13 +204,64 @@ describe("quota hand-off", () => {
     expect(spawns()).toHaveLength(1);
   });
 
-  it("hands off a later failure of the same thread again", async () => {
-    const setup = { errors: { thr_src: { id: "evt_1", message: POOL_OUT } } };
-    const { fail, spawns } = host(setup);
+  /** One failed turn as bb logs it: the request, the pool's error, the failed completion. */
+  const failedTurn = (n: number, input: Record<string, unknown> = {}): Row[] => [
+    { id: `req_${n}`, type: "client/turn/requested", data: { input: [{ type: "text", text: `turn ${n}` }], ...input } },
+    { id: `evt_${n}`, type: "provider/error", data: { message: "Provider error", detail: POOL_OUT } },
+    { id: `done_${n}`, type: "turn/completed", data: { status: "failed" } },
+  ];
+  const completedTurn = (n: number): Row[] => [
+    { id: `req_${n}`, type: "client/turn/requested", data: { input: [{ type: "text", text: `turn ${n}` }] } },
+    { id: `done_${n}`, type: "turn/completed", data: { status: "completed" } },
+  ];
+
+  // 26.11: every child failure woke the out-of-quota orchestrator, each wake failed, and each failure got its own
+  // successor; three Claude threads took the same work within three minutes.
+  it("sends later failures to the same successor while the thread has not worked since the hand-off", async () => {
+    const log = failedTurn(1);
+    const { fail, spawns, sends, metadata } = host({ logs: { thr_src: log } });
     await fail({ id: "thr_src" });
-    setup.errors.thr_src = { id: "evt_2", message: POOL_OUT };
+    log.push(...failedTurn(2, { source: "tell", initiator: "system" }));
+    await fail({ id: "thr_src" });
+    log.push(...failedTurn(3, { source: "tell", initiator: "user" }));
+    await fail({ id: "thr_src" });
+
+    expect(spawns()).toHaveLength(1);
+    expect(sends().map((send) => send.threadId)).toEqual(["thr_next1", "thr_next1"]);
+    expect(JSON.stringify(sends()[0].input)).toContain("turn 2");
+    expect(JSON.stringify(sends()[1].input)).toContain("turn 3");
+    expect(metadata.get("thr_src")).toMatchObject({ quotaHandoff: { failureEventId: "evt_3", successorThreadId: "thr_next1" } });
+  });
+
+  it("starts a new successor when the thread completed a turn after the hand-off", async () => {
+    const log = failedTurn(1);
+    const { fail, spawns, sends } = host({ logs: { thr_src: log } });
+    await fail({ id: "thr_src" });
+    log.push(...completedTurn(2), ...failedTurn(3));
     await fail({ id: "thr_src" });
     expect(spawns()).toHaveLength(2);
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("starts a new successor when the owner archived the previous one", async () => {
+    const log = failedTurn(1);
+    const { fail, spawns, sends, archived } = host({ logs: { thr_src: log } });
+    await fail({ id: "thr_src" });
+    archived.add("thr_next1");
+    log.push(...failedTurn(2));
+    await fail({ id: "thr_src" });
+    expect(spawns()).toHaveLength(2);
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("does not send the successor's own message back to it", async () => {
+    const log = failedTurn(1);
+    const { fail, spawns, sends } = host({ logs: { thr_src: log } });
+    await fail({ id: "thr_src" });
+    log.push(...failedTurn(2, { source: "tell", initiator: "agent", senderThreadId: "thr_next1" }));
+    await fail({ id: "thr_src" });
+    expect(spawns()).toHaveLength(1);
+    expect(sends()).toHaveLength(0);
   });
 
   it("follows the plugin settings: target and the off switch", async () => {
