@@ -25,8 +25,9 @@ type Fractions = {
   geminiResets?: { "5h"?: string; weekly?: string };
 };
 
-const RESET_5H = "2026-11-23T18:00:00Z";
-const RESET_WEEK = "2026-11-28T09:00:00Z";
+// Relative to the run, so the weekly window is never "expiring soon" unless a test says so.
+const RESET_5H = new Date(Date.now() + 3 * 3600_000).toISOString();
+const RESET_WEEK = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
 
 function usageJson(f: Fractions): string {
   const bucket = (id: string, window: string, remaining_fraction: number) => ({

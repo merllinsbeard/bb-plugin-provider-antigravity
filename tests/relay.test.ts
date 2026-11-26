@@ -23,7 +23,7 @@ function usageJson(gemini5h: number, geminiWeekly = gemini5h): string {
     name: window,
     window,
     remaining_fraction,
-    reset_time: "2026-11-28T09:00:00Z",
+    reset_time: new Date(Date.now() + 6 * 24 * 3600_000).toISOString(),
   });
   return JSON.stringify({
     status: "SUCCESS",
@@ -99,7 +99,7 @@ describe("shareConversations", () => {
       writeFileSync(path.join(altDir, "conversations", "keep.db"), "alt-copy");
       writeFileSync(path.join(altDir, "conversations", "move.db"), "moved-copy");
 
-      shareConversations(paths, { name: "alt" as AccountName, dir: altDir, egress: { kind: "direct" } });
+      shareConversations(paths, { name: "alt" as AccountName, dir: altDir, disabled: false, disabledReason: null, egress: { kind: "direct" } });
       expect(readFileSync(path.join(paths.agyStateDir, "conversations", "keep.db"), "utf8")).toBe("store-copy");
       expect(readFileSync(path.join(paths.agyStateDir, "conversations", "move.db"), "utf8")).toBe("moved-copy");
       expect(existsSync(path.join(altDir, "conversations", "move.db"))).toBe(false);

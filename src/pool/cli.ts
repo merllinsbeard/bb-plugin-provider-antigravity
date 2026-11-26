@@ -12,6 +12,7 @@ import {
   listAccounts,
   parseAccountName,
   poolPaths,
+  setDisabled,
   sharedGeminiConfigStatus,
   syncAccountConfig,
   type Account,
@@ -101,6 +102,7 @@ async function resolve(pidArg: string | undefined, rest: readonly string[]): Pro
       family,
       refused,
       oneShot: process.env.AGY_POOL_ONE_SHOT === "1",
+      rebalance: process.env.AGY_POOL_REBALANCE === "1",
     },
   );
   if (!resolution.ok) fail(resolution.message);
@@ -154,6 +156,8 @@ async function list(): Promise<void> {
       dir: account.dir,
       egress: describeEgress(account),
       authenticated: isAuthenticated(account),
+      disabled: account.disabled,
+      ...(account.disabledReason === null ? {} : { disabledReason: account.disabledReason }),
       boundThreads: [...bindings.values()].filter((binding) => binding.account === account.name).length,
       liveThreads: live.get(account.name) ?? 0,
       quota: outcome.ok ? outcome.reading.windows : null,
@@ -169,6 +173,24 @@ function syncAll(): void {
   process.stdout.write(`${JSON.stringify({ sharedRoot, sharedFiles: sharedGeminiConfigStatus(home), accounts }, null, 2)}\n`);
 }
 
+const TOGGLE_USAGE = "agy-pool: usage `agy-pool disable <name> [reason...]` or `agy-pool enable <name>`.";
+
+/** `disable <name> [reason...]` and `enable <name>`: take an account out of automatic picking, or put it back. */
+function toggle(disabled: boolean, args: readonly string[]): void {
+  const [raw, ...words] = args;
+  const name = parseAccountName(raw ?? "") ?? fail(TOGGLE_USAGE);
+  if (!disabled && words.length > 0) fail(TOGGLE_USAGE);
+  const account =
+    listAccounts(paths).find((candidate) => candidate.name === name) ??
+    fail(`agy-pool: no account named "${name}". \`agy-pool list\` shows the pool.`);
+  const reason = words.join(" ").trim() || null;
+  setDisabled(account, disabled, reason);
+  const after = readAccount(account.name, account.dir);
+  process.stdout.write(
+    `${JSON.stringify({ account: after.name, disabled: after.disabled, ...(after.disabledReason === null ? {} : { disabledReason: after.disabledReason }) })}\n`,
+  );
+}
+
 const [command, arg, ...more] = process.argv.slice(2);
 switch (command) {
   case "resolve":
@@ -182,6 +204,10 @@ switch (command) {
     break;
   case "sync":
     syncAll();
+    break;
+  case "disable":
+  case "enable":
+    toggle(command === "disable", arg === undefined ? [] : [arg, ...more]);
     break;
   default:
     fail(`agy-pool: unknown command ${command ?? "(none)"}.`);
