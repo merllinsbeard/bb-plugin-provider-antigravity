@@ -118,7 +118,7 @@ describe("parseUsageJson", () => {
     if (!result.ok) expect(result.failure.kind).toBe("malformed");
   });
 
-  it("keeps usable buckets, drops empty groups, and tolerates unknown fields", () => {
+  it("keeps usable buckets (with or without a reset), drops disabled buckets and empty groups, and tolerates unknown fields", () => {
     const result = parseUsageJson(
       usage([
         { name: "Empty", buckets: [{ id: "x", remaining_fraction: Number.NaN }] },
@@ -130,6 +130,9 @@ describe("parseUsageJson", () => {
             { id: "bad", remaining_fraction: "1" },
             { name: "Daily cap", window: "daily", remaining_fraction: 0.5, reset_time: "soon", future: 1 },
             { window: "monthly", remaining_fraction: 0.25, reset_time: 12 },
+            { id: "3p-5h", window: "5h", disabled: true, remaining_fraction: 1 },
+            { id: "no-reset", name: "No reset", window: "weekly", remaining_fraction: 0.75 },
+            { id: "zero-reset", name: "Unused", window: "5h", remaining_fraction: 1, reset_time: "1970-01-01T00:00:00Z" },
           ],
         },
       ]),
@@ -153,6 +156,20 @@ describe("parseUsageJson", () => {
                 name: "",
                 window: "other",
                 remainingFraction: 0.25,
+                resetsAtIso: null,
+              },
+              {
+                bucketId: "no-reset",
+                name: "No reset",
+                window: "weekly",
+                remainingFraction: 0.75,
+                resetsAtIso: null,
+              },
+              {
+                bucketId: "zero-reset",
+                name: "Unused",
+                window: "5h",
+                remainingFraction: 1,
                 resetsAtIso: null,
               },
             ],
