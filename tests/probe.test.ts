@@ -19,7 +19,8 @@ const liveJson = readFileSync(path.join(fixtures, "usage-live.json"), "utf8");
 
 function ports(run: PrintRun | (() => Promise<PrintRun>), overrides: Partial<ProbePorts> = {}) {
   const runPrint = vi.fn(typeof run === "function" ? run : async () => run);
-  return { locateBinary: () => "/opt/agy", hasAuthToken: () => true, runPrint, ...overrides };
+  const readDirect = vi.fn(async () => ({ kind: "fallback" as const }));
+  return { locateBinary: () => "/opt/agy", hasAuthToken: () => true, readDirect, runPrint, ...overrides };
 }
 
 const exited = (stdout: string, code: number | null = 0, stderr = ""): PrintRun => ({ kind: "exited", code, stdout, stderr });
@@ -43,16 +44,18 @@ describe("probeQuota", () => {
     }
   });
 
-  it("reports not_installed without spawning when agy is missing", async () => {
+  it("reports not_installed without spawning or calling the API when agy is missing", async () => {
     const p = ports(exited(liveJson), { locateBinary: () => null });
     expect(await probeQuota(p)).toEqual({ ok: false, failure: { status: "not_installed" } });
     expect(p.runPrint).not.toHaveBeenCalled();
+    expect(p.readDirect).not.toHaveBeenCalled();
   });
 
-  it("reports unauthenticated without spawning when no sign-in token exists", async () => {
+  it("reports unauthenticated without spawning or calling the API when no sign-in token exists", async () => {
     const p = ports(exited(liveJson), { hasAuthToken: () => false });
     expect(await probeQuota(p)).toEqual({ ok: false, failure: { status: "unauthenticated" } });
     expect(p.runPrint).not.toHaveBeenCalled();
+    expect(p.readDirect).not.toHaveBeenCalled();
   });
 
   it("reports expired when agy asked for authentication", async () => {

@@ -5,6 +5,7 @@ import {
   experimental_hostToolchain,
   experimental_spawnHostProcess,
 } from "@get-bb/plugin-sdk/process";
+import type { DirectRead } from "./direct-api.ts";
 import { parseUsageJson, type ParseFailure } from "./print-reader.ts";
 import type { Command } from "../pool/account.ts";
 import type { ProbeFailure, ProbeOutcome } from "./types.ts";
@@ -26,6 +27,8 @@ export type PrintRun =
 export type ProbePorts = {
   readonly locateBinary: () => string | null;
   readonly hasAuthToken: () => boolean;
+  /** Fast path; `fallback` hands the read to `agy -p /usage`. */
+  readonly readDirect: () => Promise<DirectRead>;
   readonly runPrint: (binary: string) => Promise<PrintRun>;
 };
 
@@ -147,6 +150,14 @@ export async function probeQuota(ports: ProbePorts): Promise<ProbeOutcome> {
   const binary = ports.locateBinary();
   if (binary === null) return { ok: false, failure: { status: "not_installed" } };
   if (!ports.hasAuthToken()) return { ok: false, failure: { status: "unauthenticated" } };
+  const direct = await ports.readDirect();
+  if (direct.kind === "error") return { ok: false, failure: { status: "error", message: direct.message } };
+  if (direct.kind === "read")
+    return {
+      ok: true,
+      quota: direct.quota,
+      reading: { accountEmail: null, planLabel: null, tier: direct.tier, windows: toQuotaWindows(direct.quota) },
+    };
   const run = await ports.runPrint(binary);
   if (run.kind !== "exited") return { ok: false, failure: runFailure(run) };
   const parsed = parseUsageJson(run.stdout);

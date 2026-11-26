@@ -22,7 +22,8 @@ const wireBucketSchema = z.object({
   name: optionalString,
   window: optionalString,
   remaining_fraction: z.unknown(),
-  reset_time: z.unknown(),
+  reset_time: z.unknown().optional(),
+  disabled: z.boolean().optional().catch(undefined),
 });
 
 const wireGroupSchema = z.object({
@@ -50,10 +51,11 @@ function spanOf(window: string | undefined): QuotaWindowSpan {
     : "other";
 }
 
+/** agy prints Google's zero timestamp (1970-01-01) for a bucket with no reset scheduled; the API omits it. */
 function resetIso(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const time = Date.parse(value);
-  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+  return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : null;
 }
 
 function toBucket(
@@ -64,6 +66,8 @@ function toBucket(
   const parsed = wireBucketSchema.safeParse(raw);
   if (!parsed.success) return null;
   const bucket = parsed.data;
+  // Google disables a 5h bucket while its weekly bucket is spent: it does not apply then.
+  if (bucket.disabled === true) return null;
   if (
     typeof bucket.remaining_fraction !== "number" ||
     !Number.isFinite(bucket.remaining_fraction)
@@ -113,10 +117,14 @@ export function parseUsageJson(stdout: string): ParseResult {
       ok: false,
       failure: { kind: "malformed", detail: `unexpected command ${command.name ?? "without a name"}` },
     };
-  const groups = (command.data?.groups ?? [])
-    .map(toGroup)
-    .filter((group) => group !== null);
-  if (groups.length === 0)
+  const quota = parseQuotaGroups(command.data?.groups ?? []);
+  if (quota === null)
     return { ok: false, failure: { kind: "malformed", detail: "no usable quota buckets" } };
-  return { ok: true, quota: { groups } };
+  return { ok: true, quota };
+}
+
+/** Groups in agy's snake_case wire shape; null when none holds a usable bucket. */
+export function parseQuotaGroups(rawGroups: readonly unknown[]): ProviderQuota | null {
+  const groups = rawGroups.map(toGroup).filter((group) => group !== null);
+  return groups.length === 0 ? null : { groups };
 }
