@@ -19,7 +19,7 @@ import {
 } from "./account.ts";
 import { PROXY_FILE, parseProxyUrl, type ProxyRoute } from "./egress.ts";
 import { liveThreadCounts, readBindings } from "./bindings.ts";
-import { exhaustionFile, markExhausted, readExhausted } from "./exhaustion.ts";
+import { clearExhausted, exhaustionFile, markExhausted, readExhausted } from "./exhaustion.ts";
 import { parseModelFamily } from "./family.ts";
 import { resolveAccount } from "./launcher.ts";
 import { probeAccount } from "./probe-account.ts";
@@ -75,8 +75,9 @@ async function resolve(pidArg: string | undefined, rest: readonly string[]): Pro
   const family = parseModelFamily(rawFamily ?? "");
   const refused = (rawAccount ?? "").split(",").flatMap((raw) => parseAccountName(raw) ?? []);
   const resetMs = Number(rawMs);
+  const marks = exhaustionFile(paths.bindingsFile);
   if (family !== null && refused[0] !== undefined && Number.isFinite(resetMs) && resetMs > 0)
-    markExhausted(exhaustionFile(paths.bindingsFile), refused[0], family, new Date(Date.now() + resetMs));
+    markExhausted(marks, refused[0], family, new Date(Date.now() + resetMs));
   const agy = requireAgy();
   const resolution = await resolveAccount(
     {
@@ -85,7 +86,13 @@ async function resolve(pidArg: string | undefined, rest: readonly string[]): Pro
         const outcome = await probeAccount(paths, account, () => agy);
         return outcome.ok ? outcome.quota : null;
       },
-      exhausted: readExhausted(exhaustionFile(paths.bindingsFile), new Date()),
+      exhausted: readExhausted(marks, new Date()),
+      clearExhausted: (entries) => {
+        clearExhausted(marks, entries);
+        process.stderr.write(
+          `agy-pool: live quota shows room again; cleared stale ${entries.map(({ account, family }) => `${family} mark of "${account}"`).join(", ")}.\n`,
+        );
+      },
     },
     {
       threadId: process.env.BB_THREAD_ID || null,
